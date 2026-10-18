@@ -50,6 +50,14 @@ defmodule Smolquery.Burst.Policy do
   many times `merge_fan_in` inputs, and the groups left over go to runners
   one each; `0` keeps every merge shard on runners. A level that would be
   one shard is not run: the coordinator merges those partials itself.
+
+  When the runners spilled their partials split by group-key hash
+  (`merge_partitions`, T-701), a level is dealt by partition instead
+  (`partition_groups/2`): a shard takes whole partitions, so every group
+  it answers is complete and nothing it leaves overlaps another shard's.
+  Partitions pack into shards up to `merge_target_bytes`; one over the
+  target is a shard alone. One level finishes the merge, and the final
+  reads only the shrunk outputs.
   """
 
   @type request :: false | :auto | non_neg_integer()
@@ -132,6 +140,33 @@ defmodule Smolquery.Burst.Policy do
 
   def merge_groups(spilled, %{merge_min_bytes: floor} = config) do
     if Enum.sum_by(spilled, & &1.bytes) < floor, do: {[], spilled}, else: deal(spilled, config)
+  end
+
+  @doc """
+  The merge groups one level deals `partitions` into, each a list of
+  whole partitions in the order given packed up to `merge_target_bytes`,
+  a partition over the target alone; none when the partitions together
+  are under `merge_min_bytes`. A partition here is the sum of one hash
+  bucket across every spilled partial, and no two of them share a group,
+  so a shard over a group of them answers complete groups and the level
+  is the last.
+  """
+  @spec partition_groups([partial()], merge_config()) :: [[partial()]]
+  def partition_groups(partitions, %{merge_min_bytes: floor, merge_target_bytes: target}) do
+    if Enum.sum_by(partitions, & &1.bytes) < floor, do: [], else: pack(partitions, target)
+  end
+
+  defp pack(partitions, target) do
+    partitions
+    |> Enum.reduce([], fn
+      partition, [{group, bytes} | rest] when bytes + partition.bytes <= target ->
+        [{[partition | group], bytes + partition.bytes} | rest]
+
+      partition, groups ->
+        [{[partition], partition.bytes} | groups]
+    end)
+    |> Enum.reverse()
+    |> Enum.map(fn {group, _bytes} -> Enum.reverse(group) end)
   end
 
   @doc """

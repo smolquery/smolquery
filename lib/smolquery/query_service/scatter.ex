@@ -81,7 +81,13 @@ defmodule Smolquery.QueryService.Scatter do
      only while there is enough spilled to be
      worth a lease and the level before it halved the bytes
      (`Policy.merge_shrank?/2`); what is left merges with the inline
-     partials in the final. The inputs every level consumed are deleted
+     partials in the final. When `burst.merge_partitions` is over 1 and
+     the decomposition has group keys, a runner spills its partial split
+     by `hash(keys) % partitions` (`Decomposer.partition_sql/2`), and the
+     level is dealt by partition instead (`Policy.partition_groups/2`): a
+     shard takes whole buckets across every runner's partial, every group
+     it answers is complete, and that one level is the merge; the final
+     reads the shrunk outputs. The inputs every level consumed are deleted
      with the job's other spills after the final, off the merge's
      critical path. A merge shard is a `shard` span
      with `merge_level` and `inputs`, and the levels sit under one
@@ -507,7 +513,7 @@ defmodule Smolquery.QueryService.Scatter do
   defp cleanup_keys(%Runtime{store: nil}, _dealt, _partials, _inputs, _job_id), do: []
 
   defp cleanup_keys(runtime, %{shards: shards}, partials, inputs, job_id) do
-    reported = for %{spilled: key} <- inputs, is_binary(key), do: key
+    reported = Enum.flat_map(inputs, &keys/1)
     answered = for %{kind: :runner, index: index} <- partials, do: index
 
     silent =
@@ -588,6 +594,7 @@ defmodule Smolquery.QueryService.Scatter do
               level: 1,
               shards: 0,
               peer_shards: 0,
+              partitioned: false,
               consumed: [],
               spilled_bytes: spilled_bytes(partials),
               next_index: 1 + Enum.max(for {%{index: index}, _files} <- context.shards, do: index)
@@ -600,7 +607,7 @@ defmodule Smolquery.QueryService.Scatter do
 
   defp merge_deal(partials, %{runtime: %Runtime{burst: burst}} = context) do
     {spilled, inline} = Enum.split_with(partials, &spilled?/1)
-    {groups, left} = Policy.merge_groups(spilled, burst)
+    {groups, left} = merge_groups(spilled, burst)
 
     case Policy.merge_shards(groups, rotated_peers(context), burst) do
       [] -> {[], partials}
@@ -615,19 +622,47 @@ defmodule Smolquery.QueryService.Scatter do
     tail ++ head
   end
 
+  defp merge_groups(spilled, burst) do
+    case Enum.split_with(spilled, &partitioned?/1) do
+      {[], whole} -> Policy.merge_groups(whole, burst)
+      {split, whole} -> {Policy.partition_groups(partitions(split), burst), whole}
+    end
+  end
+
+  defp partitions(split) do
+    split
+    |> Enum.flat_map(& &1.parts)
+    |> Enum.group_by(& &1.partition)
+    |> Enum.sort()
+    |> Enum.map(fn {partition, parts} ->
+      %{partition: partition, parts: parts, bytes: Enum.sum_by(parts, & &1.bytes)}
+    end)
+  end
+
   defp spilled?(%{spilled: key}), do: is_binary(key)
+
+  defp partitioned?(partial), do: match?(%{parts: [_ | _]}, partial)
 
   defp spilled_bytes(partials),
     do: partials |> Enum.filter(&spilled?/1) |> Enum.sum_by(& &1.bytes)
 
+  defp paths(%{parts: [_ | _] = parts}), do: Enum.map(parts, & &1.location)
+  defp paths(%{path: path}), do: [path]
+
+  defp keys(%{parts: [_ | _] = parts}), do: Enum.map(parts, & &1.key)
+  defp keys(%{spilled: key}) when is_binary(key), do: [key]
+  defp keys(_inline), do: []
+
   defp levels(context, dir, {shards, kept}, stats) do
     grouped = Enum.flat_map(shards, &elem(&1, 1))
+    stats = %{stats | partitioned: Enum.any?(grouped, &Map.has_key?(&1, :partition))}
     descend(context, dir, {grouped, kept}, merge_targets(shards, context, stats), stats)
   end
 
   defp merge_targets(shards, %{runtime: %Runtime{burst: %{pool: pool}}}, stats) do
     Enum.with_index(shards, fn {host, group}, offset ->
-      merge = %{level: stats.level, locations: Enum.map(group, & &1.path)}
+      merge = %{level: stats.level, locations: Enum.flat_map(group, &paths/1)}
+      merge = if stats.partitioned, do: Map.put(merge, :partitions, length(group)), else: merge
       {merge_target(host, pool, stats.next_index + offset, merge), []}
     end)
   end
@@ -641,7 +676,7 @@ defmodule Smolquery.QueryService.Scatter do
   defp descend(%{runtime: runtime} = context, dir, {grouped, kept}, targets, stats) do
     case level(context, dir, targets) do
       {:ok, merged} ->
-        stats = advanced(stats, targets, Enum.map(grouped, & &1.spilled))
+        stats = advanced(stats, targets, Enum.flat_map(grouped, &keys/1))
         bytes = {Enum.sum_by(grouped, & &1.bytes), Enum.sum_by(merged, & &1.bytes)}
         next_level(context, dir, kept ++ merged, bytes, stats)
 
@@ -660,7 +695,8 @@ defmodule Smolquery.QueryService.Scatter do
   end
 
   defp next_level(context, dir, partials, {bytes_in, bytes_out}, stats) do
-    with true <- Policy.merge_shrank?(bytes_in, bytes_out),
+    with false <- stats.partitioned,
+         true <- Policy.merge_shrank?(bytes_in, bytes_out),
          {[_ | _] = groups, kept} <- merge_deal(partials, context) do
       levels(context, dir, {groups, kept}, stats)
     else
@@ -705,6 +741,7 @@ defmodule Smolquery.QueryService.Scatter do
       levels: levels,
       shards: shards,
       peer_shards: stats.peer_shards,
+      partitioned: stats.partitioned,
       consumed: length(stats.consumed),
       spilled_bytes: stats.spilled_bytes,
       left_bytes: stats.left_bytes
@@ -741,14 +778,17 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
+  defp landed(%{spilled: %{key: key, bytes: bytes, parts: [_ | _] = parts}}, _dir, _index),
+    do: %{path: nil, spilled: key, bytes: bytes, parts: parts}
+
   defp landed(%{spilled: %{location: location, key: key, bytes: bytes}}, _dir, _index),
-    do: %{path: location, spilled: key, bytes: bytes}
+    do: %{path: location, spilled: key, bytes: bytes, parts: nil}
 
   defp landed(%{parquet: parquet}, partials_dir, index) do
     path = Path.join(partials_dir, "partial-#{index}.parquet")
     File.write!(path, parquet)
 
-    %{path: path, spilled: nil, bytes: byte_size(parquet)}
+    %{path: path, spilled: nil, bytes: byte_size(parquet), parts: nil}
   end
 
   defp concurrency(shards, runner_shards, %Runtime{burst: %{max_inflight: max_inflight}}),
@@ -837,14 +877,14 @@ defmodule Smolquery.QueryService.Scatter do
     |> peer_spill(target, context)
   end
 
-  defp request(%{kind: :runner, index: index}, files, %{runner_base: runner_base} = context) do
+  defp request(%{kind: :runner} = target, files, %{runner_base: runner_base} = context) do
     runner_base
     |> Map.merge(%{files: files, allowed_paths: []})
-    |> with_spill(context, index)
+    |> with_spill(context, target)
   end
 
-  defp peer_spill(request, %{merge: _level, index: index}, context),
-    do: with_spill(request, context, index)
+  defp peer_spill(request, %{merge: _level} = target, context),
+    do: with_spill(request, context, target)
 
   defp peer_spill(request, _scan_target, _context), do: request
 
@@ -857,13 +897,26 @@ defmodule Smolquery.QueryService.Scatter do
 
   defp merge_sql(request, _scan_target, _context), do: request
 
-  defp with_spill(request, %{runtime: %Runtime{store: nil}}, _index), do: request
+  defp with_spill(request, %{runtime: %Runtime{store: nil}}, _target), do: request
 
-  defp with_spill(request, %{runtime: runtime, job_id: job_id}, index) do
-    Map.put(request, :spill, %{
-      key: spill_key(runtime, job_id, index),
+  defp with_spill(request, %{runtime: runtime, job_id: job_id} = context, target) do
+    spill = %{
+      key: spill_key(runtime, job_id, target.index),
       inline_max_bytes: runtime.burst.spill_inline_max_bytes
-    })
+    }
+
+    Map.put(request, :spill, with_partitions(spill, target, context))
+  end
+
+  defp with_partitions(spill, %{merge: _level}, _context), do: spill
+
+  defp with_partitions(spill, _scan_target, %{runtime: runtime, decomposition: decomposition}) do
+    count = runtime.burst.merge_partitions
+
+    case count > 1 && Decomposer.partition_sql(decomposition, count) do
+      by when is_binary(by) -> Map.put(spill, :partitions, %{count: count, by: by})
+      _none -> spill
+    end
   end
 
   defp retried_sealed(%{retry: true}, files),
@@ -911,8 +964,10 @@ defmodule Smolquery.QueryService.Scatter do
 
     base =
       case target do
-        %{merge: %{level: level, locations: locations}} ->
-          Map.merge(base, %{merge_level: level, inputs: length(locations)})
+        %{merge: %{level: level, locations: locations} = merge} ->
+          base
+          |> Map.merge(%{merge_level: level, inputs: length(locations)})
+          |> Map.merge(Map.take(merge, [:partitions]))
 
         _scan_target ->
           base
@@ -977,7 +1032,7 @@ defmodule Smolquery.QueryService.Scatter do
   defp bounded(final, max_rows), do: "SELECT * FROM (#{final}) LIMIT #{max_rows + 1}"
 
   defp merge(runtime, connection, decomposition, partials) do
-    paths = Enum.map(partials, & &1.path)
+    paths = Enum.flat_map(partials, &paths/1)
     final = Decomposer.final_sql(decomposition, Views.read_parquet(paths))
 
     with :ok <- uncached_spill(runtime, connection, partials),

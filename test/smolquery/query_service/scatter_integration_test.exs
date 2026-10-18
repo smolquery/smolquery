@@ -722,7 +722,8 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
          spill_inline_max_bytes: 0,
          merge_fan_in: 2,
          merge_min_bytes: 0,
-         merge_peer_weight: 0
+         merge_peer_weight: 0,
+         merge_partitions: 1
        ]
   test "spilled partials merge in a tree on runners before the final, and leave nothing behind (T-685, T-700)",
        %{control: control, distributed: distributed, tmp_dir: tmp_dir, catalog: catalog} do
@@ -760,7 +761,8 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
          spill: true,
          spill_inline_max_bytes: 0,
          merge_fan_in: 2,
-         merge_min_bytes: 0
+         merge_min_bytes: 0,
+         merge_partitions: 1
        ]
   test "merge shards run on the peers first, and spill through the peer's own store (T-701)",
        %{control: control, distributed: distributed, tmp_dir: tmp_dir, catalog: catalog} do
@@ -788,6 +790,62 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
                merge.meta
 
       assert rows > 0 and merge.meta.node in scan_peers(job)
+    end
+
+    assert {:ok, []} = Store.list(seed_store(tmp_dir), "burst-partials")
+  end
+
+  @tag burst: [
+         max: 4,
+         spill: true,
+         spill_inline_max_bytes: 0,
+         merge_min_bytes: 0,
+         merge_target_bytes: 1,
+         merge_partitions: 2,
+         merge_peer_weight: 1
+       ]
+  test "runners spill their partials split by group-key hash, and one level merges whole buckets (T-701)",
+       %{control: control, distributed: distributed, tmp_dir: tmp_dir, catalog: catalog} do
+    seal_seventh(catalog, tmp_dir)
+    sql = "SELECT id, count(*) AS c FROM analytics.events GROUP BY id ORDER BY id"
+    both(control, distributed, sql, burst: 4)
+
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, sql, burst: 4, trace: true)
+
+    assert %{peers: 3, burst: 4} = job.scatter
+
+    scans =
+      Enum.filter(
+        job.trace,
+        &(&1.name == :shard and &1.meta.kind == :runner and &1.meta.files > 0)
+      )
+
+    assert [_, _, _, _] = scans
+    assert Enum.all?(scans, & &1.meta.spilled)
+
+    assert [tree] = Enum.filter(job.trace, &(&1.name == :tree_merge))
+
+    assert %{
+             outcome: :ok,
+             levels: 1,
+             shards: 2,
+             peer_shards: 2,
+             partitioned: true,
+             left_bytes: left
+           } =
+             tree.meta
+
+    assert left > 0 and tree.meta.consumed >= 4
+
+    merges = Enum.filter(job.trace, &(&1.name == :shard and Map.has_key?(&1.meta, :merge_level)))
+    assert [_, _] = merges
+
+    for merge <- merges do
+      assert %{kind: :peer, merge_level: 1, partitions: 1, inputs: inputs, rows: rows} =
+               merge.meta
+
+      assert inputs in 1..4 and rows > 0
     end
 
     assert {:ok, []} = Store.list(seed_store(tmp_dir), "burst-partials")

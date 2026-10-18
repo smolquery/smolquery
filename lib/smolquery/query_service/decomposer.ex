@@ -403,6 +403,24 @@ defmodule Smolquery.QueryService.Decomposer do
   end
 
   @doc """
+  The expression that deals a partial's rows into `count` partitions by
+  their group keys, `hash(keys) % count`, for a runner that spills its
+  partial split so that a merge shard can take whole partitions across
+  every partial and finish their groups in one level (T-701). `nil` for
+  a decomposition with no group keys or one that keeps rows: a single
+  group or a row sample has nothing to partition.
+  """
+  @spec partition_sql(t(), pos_integer()) :: String.t() | nil
+  def partition_sql(%__MODULE__{rows: %{}}, _count), do: nil
+  def partition_sql(%__MODULE__{final_group: ""}, _count), do: nil
+
+  def partition_sql(%__MODULE__{items: items}, count) do
+    groups = Enum.count(items, &match?({:group, _index}, &1))
+
+    "hash(#{Enum.map_join(0..(groups - 1), ", ", &quoted("#{@prefix}g#{&1}"))}) % #{count}"
+  end
+
+  @doc """
   The final query over `from` — a `read_parquet` across the partial files.
   """
   @spec final_sql(t(), String.t()) :: String.t()

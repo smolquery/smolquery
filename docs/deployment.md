@@ -228,7 +228,8 @@ One note per release, newest first.
 - **`SMOLQUERY_BURST_MERGE_TARGET_BYTES` (`134217728`, 128 MiB)** sizes a merge shard the way `SMOLQUERY_BURST_TARGET_BYTES` sizes a scan shard, about 2 s of work; `SMOLQUERY_BURST_MERGE_FAN_IN` (`16`) is now only a cap on a shard's inputs.
 - **`SMOLQUERY_BURST_MERGE_MIN_BYTES` (`536870912`, 512 MiB)** keeps the tree off under that much spilled, and a second level runs only when the first at least halved the bytes.
 - **Merge shards run on the peers first (T-701).** `SMOLQUERY_BURST_MERGE_PEER_WEIGHT` (`4`) is how many merge groups a query pod takes as one shard before runners get the rest; a pod merges at four times a Lambda's rate for free, and spills its merged partial through its own store above the inline size. `0` restores runner-only merges.
-- **The `tree_merge` span** carries `spilled_bytes`, `left_bytes` and `peer_shards`, so a trace shows what a level saved the final and where it ran.
+- **Spills split by group-key hash (T-701).** With `SMOLQUERY_BURST_MERGE_PARTITIONS` (`16`) a runner writes a spilled partial as up to that many bucket files, and a merge shard takes whole buckets across every partial, so one level finishes every group and the final reads only the shrunk outputs; no second level, no shrink question. `1` keeps spills whole and the by-count tree. The job's spill prefix holds more, smaller objects; the sweep covers them.
+- **The `tree_merge` span** carries `spilled_bytes`, `left_bytes`, `peer_shards` and `partitioned`, so a trace shows what a level saved the final and where it ran; a bucket merge shard says how many `partitions` it took.
 
 ### 0.25.4: shard engines locked down, a smaller `auto` target, the tree merge (T-690, T-683, T-685, T-698)
 

@@ -105,6 +105,45 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       assert DataFrame.to_columns(DataFrame.from_parquet!(location))["s"] == [6]
     end
 
+    test "a spill with partitions is written split by the hash of its group keys (T-701)",
+         %{request: request, store: store} do
+      key = "burst-partials/job/3.parquet"
+
+      request =
+        Map.merge(request, %{
+          partial_sql: "SELECT id % 2 AS g, sum(id) AS s FROM analytics.events GROUP BY g",
+          spill: %{key: key, inline_max_bytes: 0, partitions: %{count: 4, by: "hash(\"g\") % 4"}}
+        })
+
+      assert {:ok,
+              %{
+                parquet: nil,
+                rows: 2,
+                spilled: %{location: nil, key: ^key, bytes: bytes, parts: parts}
+              }} =
+               PartialWorker.run_standalone(request)
+
+      assert length(parts) in 1..2
+      assert bytes == Enum.sum_by(parts, & &1.bytes) and bytes > 0
+
+      for %{partition: partition, key: part_key, location: location} <- parts do
+        assert partition in 0..3
+        assert part_key == "burst-partials/job/3-p#{partition}-0.parquet"
+        assert location == Store.location(store, part_key)
+      end
+
+      rows =
+        parts
+        |> Enum.flat_map(fn %{location: location} ->
+          frame = DataFrame.from_parquet!(location)
+          assert DataFrame.names(frame) == ["g", "s"]
+          Enum.zip(DataFrame.to_columns(frame)["g"], DataFrame.to_columns(frame)["s"])
+        end)
+        |> Enum.sort()
+
+      assert rows == [{0, 2}, {1, 4}]
+    end
+
     test "a spill the store refuses is the shard's failure, not a crash", %{
       request: request,
       tmp_dir: tmp_dir

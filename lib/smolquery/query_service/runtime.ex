@@ -268,7 +268,8 @@ defmodule Smolquery.QueryService.Runtime do
       merge_fan_in: 16,
       merge_target_bytes: 134_217_728,
       merge_min_bytes: 536_870_912,
-      merge_peer_weight: 4
+      merge_peer_weight: 4,
+      merge_partitions: 16
     }
   ]
 
@@ -333,7 +334,8 @@ defmodule Smolquery.QueryService.Runtime do
             merge_fan_in: pos_integer(),
             merge_target_bytes: pos_integer(),
             merge_min_bytes: non_neg_integer(),
-            merge_peer_weight: non_neg_integer()
+            merge_peer_weight: non_neg_integer(),
+            merge_partitions: pos_integer()
           }
         }
 
@@ -480,7 +482,8 @@ defmodule Smolquery.QueryService.Runtime do
       merge_fan_in: Keyword.fetch!(policy, :merge_fan_in),
       merge_target_bytes: Keyword.fetch!(policy, :merge_target_bytes),
       merge_min_bytes: Keyword.fetch!(policy, :merge_min_bytes),
-      merge_peer_weight: Keyword.fetch!(policy, :merge_peer_weight)
+      merge_peer_weight: Keyword.fetch!(policy, :merge_peer_weight),
+      merge_partitions: Keyword.fetch!(policy, :merge_partitions)
     }
   end
 

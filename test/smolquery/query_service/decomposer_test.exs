@@ -56,25 +56,7 @@ defmodule Smolquery.QueryService.DecomposerTest do
     expected = Engine.query!(@engine, sql)
     {:ok, decomposition} = Decomposer.decompose(@conn, sql, describe(sql), @columns)
 
-    paths =
-      try do
-        for {predicate, index} <- Enum.with_index(["n % 2 = 0", "n % 2 = 1"]) do
-          define_view(predicate)
-
-          path =
-            Path.join(tmp_dir, "partial-#{System.unique_integer([:positive])}-#{index}.parquet")
-
-          Engine.query!(
-            @engine,
-            "COPY (#{decomposition.partial_sql}) TO " <>
-              "#{Smolquery.Identifier.sql_string(path)} (FORMAT parquet)"
-          )
-
-          path
-        end
-      after
-        define_view("true")
-      end
+    paths = partials(decomposition, tmp_dir)
 
     merged =
       Engine.query!(@engine, Decomposer.final_sql(decomposition, Views.read_parquet(paths)))
@@ -88,6 +70,43 @@ defmodule Smolquery.QueryService.DecomposerTest do
     assert_rows(expected.rows, repartialed.rows)
 
     decomposition
+  end
+
+  defp partials(decomposition, tmp_dir) do
+    for {predicate, index} <- Enum.with_index(["n % 2 = 0", "n % 2 = 1"]) do
+      define_view(predicate)
+
+      path =
+        Path.join(tmp_dir, "partial-#{System.unique_integer([:positive])}-#{index}.parquet")
+
+      Engine.query!(
+        @engine,
+        "COPY (#{decomposition.partial_sql}) TO " <>
+          "#{Smolquery.Identifier.sql_string(path)} (FORMAT parquet)"
+      )
+
+      path
+    end
+  after
+    define_view("true")
+  end
+
+  defp partition_round_trip(sql, tmp_dir) do
+    expected = Engine.query!(@engine, sql)
+    {:ok, decomposition} = Decomposer.decompose(@conn, sql, describe(sql), @columns)
+    paths = partials(decomposition, tmp_dir)
+    by = Decomposer.partition_sql(decomposition, 3)
+
+    buckets =
+      for partition <- 0..2 do
+        from = "(SELECT * FROM #{Views.read_parquet(paths)} WHERE #{by} = #{partition})"
+        repartial(decomposition, from, tmp_dir)
+      end
+
+    merged =
+      Engine.query!(@engine, Decomposer.final_sql(decomposition, Views.read_parquet(buckets)))
+
+    assert_rows(expected.rows, merged.rows)
   end
 
   defp repartial_round_trip(decomposition, [first, second] = paths, tmp_dir) do
@@ -108,12 +127,15 @@ defmodule Smolquery.QueryService.DecomposerTest do
     Engine.query!(@engine, Decomposer.final_sql(decomposition, Views.read_parquet([twice])))
   end
 
-  defp repartial(decomposition, paths, tmp_dir) do
+  defp repartial(decomposition, paths, tmp_dir) when is_list(paths),
+    do: repartial(decomposition, Views.read_parquet(paths), tmp_dir)
+
+  defp repartial(decomposition, from, tmp_dir) do
     path = Path.join(tmp_dir, "repartial-#{System.unique_integer([:positive])}.parquet")
 
     Engine.query!(
       @engine,
-      "COPY (#{Decomposer.repartial_sql(decomposition, Views.read_parquet(paths))}) TO " <>
+      "COPY (#{Decomposer.repartial_sql(decomposition, from)}) TO " <>
         "#{Smolquery.Identifier.sql_string(path)} (FORMAT parquet)"
     )
 
@@ -560,6 +582,33 @@ defmodule Smolquery.QueryService.DecomposerTest do
         round_trip("SELECT sum(big) AS s, avg(big) AS a FROM analytics.events", tmp_dir)
 
       assert decomposition.partial_sql =~ "DECIMAL(38,0)"
+    end
+  end
+
+  describe "partition_sql/2 (T-701)" do
+    test "hashes the group keys modulo the count, and is nil without group keys", %{
+      tmp_dir: tmp_dir
+    } do
+      grouped = "SELECT tag, count(*) AS c, sum(value) AS v FROM analytics.events GROUP BY tag"
+      {:ok, decomposition} = Decomposer.decompose(@conn, grouped, describe(grouped), @columns)
+      assert Decomposer.partition_sql(decomposition, 4) == ~s|hash("__pq_g0") % 4|
+
+      two = "SELECT tag, big % 3 AS m, count(*) AS c FROM analytics.events GROUP BY tag, m"
+      {:ok, decomposition} = Decomposer.decompose(@conn, two, describe(two), @columns)
+      assert Decomposer.partition_sql(decomposition, 16) == ~s|hash("__pq_g0", "__pq_g1") % 16|
+
+      global = "SELECT count(*) AS c, sum(value) AS v FROM analytics.events"
+      {:ok, decomposition} = Decomposer.decompose(@conn, global, describe(global), @columns)
+      assert Decomposer.partition_sql(decomposition, 4) == nil
+
+      rows =
+        "SELECT bucket, count(*) AS n FROM " <>
+          "(SELECT bucket, value FROM analytics.events WHERE id < 500 LIMIT 5000) e GROUP BY bucket"
+
+      {:ok, decomposition} = Decomposer.decompose(@conn, rows, describe(rows), @columns)
+      assert Decomposer.partition_sql(decomposition, 4) == nil
+
+      partition_round_trip(grouped, tmp_dir)
     end
   end
 

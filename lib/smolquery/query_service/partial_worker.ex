@@ -114,6 +114,14 @@ defmodule Smolquery.QueryService.PartialWorker do
   peer merge shard does (T-701), through this node's own store, since a
   partial merged from hundreds of MB of inputs must not cross distribution
   as one message.
+
+  A spill that carries `partitions` is written split (T-701): the partial
+  is copied once more, `PARTITION_BY` the hash of its group keys modulo
+  the count, and each bucket's file goes to the store under the spill key
+  with a `-p<bucket>` suffix. The reply's `spilled` then has `parts` and
+  no single location. A merge shard can take one bucket across every
+  runner's partial and finish its groups in one level, since no group
+  lands in two buckets. A bucket no row hashed to writes no file.
   """
 
   alias Smolquery.AwsCredentials
@@ -163,7 +171,20 @@ defmodule Smolquery.QueryService.PartialWorker do
   runner writes it to, so the coordinator's merge reads it from there and
   deletes it after.
   """
-  @type spill :: %{key: Store.key(), inline_max_bytes: non_neg_integer()}
+  @type partitions :: %{count: pos_integer(), by: String.t()}
+
+  @type spill :: %{
+          required(:key) => Store.key(),
+          required(:inline_max_bytes) => non_neg_integer(),
+          optional(:partitions) => partitions()
+        }
+
+  @type part :: %{
+          partition: non_neg_integer(),
+          key: Store.key(),
+          location: String.t(),
+          bytes: non_neg_integer()
+        }
 
   @type standalone_request :: %{
           required(:engine) => engine_spec(),
@@ -369,7 +390,7 @@ defmodule Smolquery.QueryService.PartialWorker do
                  Map.get(request, :timeout_ms, :infinity)
                )
              end),
-           {:ok, partial} <- deliver(path, request, plan.store) do
+           {:ok, partial} <- deliver(engine.connection, path, request, plan.store) do
         if decision do
           :telemetry.execute([:smolquery, :query, :file_cache, :shard], %{}, %{
             decision: decision
@@ -521,23 +542,88 @@ defmodule Smolquery.QueryService.PartialWorker do
   defp copied_rows(%{rows: [[count]]}) when is_integer(count), do: count
   defp copied_rows(_result), do: 0
 
-  defp deliver(path, %{spill: %{key: key, inline_max_bytes: max}}, %Store{} = store) do
+  defp deliver(
+         connection,
+         path,
+         %{spill: %{inline_max_bytes: max} = spill} = request,
+         %Store{} = store
+       ) do
     %File.Stat{size: size} = File.stat!(path)
+    store = spill_store(store)
 
-    if size > max do
-      case Store.put(spill_store(store), key, &stage(path, &1)) do
-        {:ok, %{location: location, byte_size: bytes}} ->
-          {:ok, %{parquet: nil, spilled: %{location: location, key: key, bytes: bytes}}}
+    cond do
+      size <= max ->
+        {:ok, %{parquet: File.read!(path), spilled: nil}}
 
-        {:error, reason} ->
-          {:error, {:spill_failed, reason}}
-      end
-    else
-      {:ok, %{parquet: File.read!(path), spilled: nil}}
+      match?(%{partitions: %{count: count}} when count > 1, spill) ->
+        split(connection, path, spill, store, request)
+
+      true ->
+        spill_whole(path, spill, store)
     end
   end
 
-  defp deliver(path, _inline, _store), do: {:ok, %{parquet: File.read!(path), spilled: nil}}
+  defp deliver(_connection, path, _inline, _store),
+    do: {:ok, %{parquet: File.read!(path), spilled: nil}}
+
+  defp spill_whole(path, %{key: key}, store) do
+    case Store.put(store, key, &stage(path, &1)) do
+      {:ok, %{location: location, byte_size: bytes}} ->
+        {:ok, %{parquet: nil, spilled: %{location: location, key: key, bytes: bytes}}}
+
+      {:error, reason} ->
+        {:error, {:spill_failed, reason}}
+    end
+  end
+
+  defp split(connection, path, %{key: key, partitions: %{count: count, by: by}}, store, request) do
+    directory = Path.join(Path.dirname(path), "parts")
+
+    statement =
+      "COPY (SELECT *, (#{by}) AS __pq_part FROM read_parquet(#{Identifier.sql_string(path)})) " <>
+        "TO #{Identifier.sql_string(directory)} (FORMAT parquet, PARTITION_BY (__pq_part))"
+
+    with {:ok, _result} <-
+           Connection.query(connection, statement, [], Map.get(request, :timeout_ms, :infinity)),
+         {:ok, parts} <- upload_parts(directory, count, key, store) do
+      bytes = Enum.sum_by(parts, & &1.bytes)
+      {:ok, %{parquet: nil, spilled: %{location: nil, key: key, bytes: bytes, parts: parts}}}
+    end
+  end
+
+  defp upload_parts(directory, count, key, store) do
+    0..(count - 1)
+    |> Enum.flat_map(fn partition ->
+      directory
+      |> Path.join("__pq_part=#{partition}/*.parquet")
+      |> Path.wildcard()
+      |> Enum.with_index(fn file, index -> {partition, part_key(key, partition, index), file} end)
+    end)
+    |> Task.async_stream(
+      fn {partition, part_key, file} ->
+        {partition, part_key, Store.put(store, part_key, &stage(file, &1))}
+      end,
+      max_concurrency: 4,
+      ordered: true,
+      timeout: :infinity
+    )
+    |> Enum.reduce_while({:ok, []}, fn
+      {:ok, {partition, part_key, {:ok, %{location: location, byte_size: bytes}}}},
+      {:ok, parts} ->
+        part = %{partition: partition, key: part_key, location: location, bytes: bytes}
+        {:cont, {:ok, [part | parts]}}
+
+      {:ok, {_partition, _part_key, {:error, reason}}}, _acc ->
+        {:halt, {:error, {:spill_failed, reason}}}
+    end)
+    |> case do
+      {:ok, parts} -> {:ok, Enum.reverse(parts)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp part_key(key, partition, index),
+    do: String.replace_suffix(key, ".parquet", "-p#{partition}-#{index}.parquet")
 
   defp stage(path, staged) do
     case File.rename(path, staged) do
