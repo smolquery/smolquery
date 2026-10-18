@@ -19,6 +19,7 @@ defmodule Smolquery.Test.FullNode do
   alias Smolquery.BufferService.HotServer
   alias Smolquery.Catalog
   alias Smolquery.Catalog.DuckLake
+  alias Smolquery.Catalog.DuckLake.SqliteMetadata
   alias Smolquery.QueryService
   alias Smolquery.Schema
   alias Smolquery.StorageService
@@ -47,6 +48,7 @@ defmodule Smolquery.Test.FullNode do
 
     metadata = "sqlite:#{Path.join(context.tmp_dir, "catalog.sqlite")}"
     data_path = Path.join(context.tmp_dir, "ducklake")
+    :ok = SqliteMetadata.prepare(metadata)
 
     buffer_opts =
       case Keyword.get(buffer_opts, :catalog) do

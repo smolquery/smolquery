@@ -190,7 +190,8 @@ queries → QueryService ──────────────────�
   owner — a ring change moves ownership instantly while the previous owner still
   holds the unsealed tail.
 - **Everything durable is one directory** (or one bucket plus one Postgres).
-  Back that up and you have backed smolquery up.
+  Back that up and you have backed smolquery up. A SQLite catalog runs in WAL
+  mode, so copy its `-wal` and `-shm` files with it.
 
 ## Running locally
 

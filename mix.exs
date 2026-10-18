@@ -65,6 +65,7 @@ defmodule Smolquery.MixProject do
       {:libcluster_postgres, "~> 0.2"},
       {:postgrex, "~> 0.22"},
       {:ecto_sql, "~> 3.14"},
+      {:exqlite, "~> 0.42"},
       {:phoenix, "~> 1.8"},
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_view, "~> 1.2"},

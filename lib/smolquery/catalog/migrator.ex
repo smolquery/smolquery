@@ -108,6 +108,7 @@ defmodule Smolquery.Catalog.Migrator do
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.Catalog.DuckLake.Format
   alias Smolquery.Catalog.DuckLake.Reader
+  alias Smolquery.Catalog.DuckLake.SqliteMetadata
   alias Smolquery.Catalog.Migrations
   alias Smolquery.Catalog.Repo
 
@@ -180,12 +181,20 @@ defmodule Smolquery.Catalog.Migrator do
   when `:automatic_migration` is set. `config` holds `:metadata`,
   `:data_path` and optionally `:catalog` and `:automatic_migration`, as
   `Smolquery.Catalog.DuckLake.start_link/1` takes them.
+
+  SQLite metadata is first switched to WAL mode
+  (`Smolquery.Catalog.DuckLake.SqliteMetadata`, T-698). This step is the one
+  place that can do it safely: no engine in the node has opened the file yet.
   """
   @spec prepare(keyword()) :: :ok | {:error, term()}
   def prepare(config) do
-    case options(Keyword.get(config, :metadata)) do
-      {:ok, options} -> prepare_lake(options, config)
-      :none -> migrate_unprepared(config)
+    metadata = Keyword.get(config, :metadata)
+
+    with :ok <- SqliteMetadata.prepare(metadata) do
+      case options(metadata) do
+        {:ok, options} -> prepare_lake(options, config)
+        :none -> migrate_unprepared(config)
+      end
     end
   end
 

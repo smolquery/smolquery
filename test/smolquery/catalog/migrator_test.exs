@@ -12,6 +12,7 @@ defmodule Smolquery.Catalog.MigratorTest do
   import ExUnit.CaptureLog
 
   alias Smolquery.Catalog.DuckLake
+  alias Smolquery.Catalog.DuckLake.SqliteMetadata
   alias Smolquery.Catalog.Migrations
   alias Smolquery.Catalog.Migrator
   alias Smolquery.Engine
@@ -99,9 +100,13 @@ defmodule Smolquery.Catalog.MigratorTest do
     assert Migrator.prepare_cluster([]) == :ok
   end
 
-  test "prepare/1 has nothing to do for a SQLite lake" do
-    assert Migrator.prepare(metadata: "sqlite:/tmp/never.sqlite", data_path: "/tmp/never") == :ok
-    refute File.exists?("/tmp/never.sqlite")
+  @tag :tmp_dir
+  test "prepare/1 only switches a SQLite lake's file to WAL mode (T-698)", %{tmp_dir: tmp} do
+    path = Path.join(tmp, "catalog.sqlite")
+
+    assert Migrator.prepare(metadata: "sqlite:" <> path, data_path: Path.join(tmp, "data")) == :ok
+    assert SqliteMetadata.journal_mode(path) == {:ok, "wal"}
+    refute ducklake_tables?(path)
   end
 
   describe "over a Postgres metadata database" do
@@ -290,11 +295,27 @@ defmodule Smolquery.Catalog.MigratorTest do
       config = [metadata: "sqlite:" <> metadata, data_path: Path.join(context.tmp_dir, "data")]
 
       assert Migrator.prepare(config) == :ok
-      refute File.exists?(metadata)
+      refute ducklake_tables?(metadata)
 
       assert Migrator.prepare(config ++ [automatic_migration: true]) == :ok
-      assert File.exists?(metadata)
+      assert ducklake_tables?(metadata)
     end
+  end
+
+  defp ducklake_tables?(path) do
+    engine = :"migrator_test_reader_#{System.unique_integer([:positive])}"
+    attach = "ATTACH #{Smolquery.Identifier.sql_string(path)} AS meta (TYPE sqlite, READ_ONLY)"
+    {:ok, pid} = Engine.start_link(name: engine, extensions: [:sqlite], statements: [attach])
+
+    %{rows: [[count]]} =
+      Engine.query!(
+        engine,
+        "SELECT count(*) FROM duckdb_tables() " <>
+          "WHERE database_name = 'meta' AND table_name = 'ducklake_metadata'"
+      )
+
+    Supervisor.stop(pid)
+    count == 1
   end
 
   defp log_info do

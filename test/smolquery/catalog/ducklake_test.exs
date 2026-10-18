@@ -16,6 +16,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
 
   alias Smolquery.Catalog
   alias Smolquery.Catalog.DuckLake
+  alias Smolquery.Catalog.DuckLake.SqliteMetadata
   alias Smolquery.Engine
   alias Smolquery.Engine.Result
   alias Smolquery.Identifier
@@ -24,6 +25,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
   alias Smolquery.Schema.Materialized
   alias Smolquery.Segments.Store.Local
   alias Smolquery.Test.SegmentFixture
+  alias Smolquery.Test.SqliteLock
 
   @moduletag :integration
   @moduletag :tmp_dir
@@ -34,10 +36,13 @@ defmodule Smolquery.Catalog.DuckLakeTest do
   @table {"analytics", "events"}
 
   setup context do
+    metadata = "sqlite:#{Path.join(context.tmp_dir, "catalog.sqlite")}"
+    :ok = SqliteMetadata.prepare(metadata)
+
     start_supervised!(
       {DuckLake,
        name: @engine,
-       metadata: "sqlite:#{Path.join(context.tmp_dir, "catalog.sqlite")}",
+       metadata: metadata,
        data_path: Path.join(context.tmp_dir, "data"),
        connections: 2}
     )
@@ -1591,6 +1596,49 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert :ok = Catalog.create_table(catalog, {"analytics", "varied"}, schema)
       assert {:ok, read} = Catalog.table_schema(catalog, {"analytics", "varied"})
       assert anonymous(read) == schema
+    end
+  end
+
+  describe "SQLite metadata under a held lock (T-698)" do
+    test "a commit does not wait for another process's open read", %{
+      catalog: catalog,
+      tmp_dir: tmp
+    } do
+      SqliteLock.hold(
+        Path.join(tmp, "catalog.sqlite"),
+        "BEGIN; SELECT count(*) FROM ducklake_snapshot",
+        10_000
+      )
+
+      {micros, result} =
+        :timer.tc(fn -> Catalog.put_clustering(catalog, @table, ["ts"]) end)
+
+      assert result == :ok
+      assert micros < 2_000_000
+    end
+
+    test "a table-option commit retries past another process's write", %{
+      catalog: catalog,
+      tmp_dir: tmp
+    } do
+      parent = self()
+      handler = "ducklake-commit-attempt-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:smolquery, :catalog, :commit_attempt],
+        fn _event, _measurements, meta, _config -> send(parent, {:attempt, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      SqliteLock.hold(Path.join(tmp, "catalog.sqlite"), "BEGIN IMMEDIATE", 500)
+
+      assert Catalog.put_clustering(catalog, @table, ["ts"]) == :ok
+      assert_received {:attempt, %{attempt: 1, result: :conflict}}
+      assert_received {:attempt, %{result: :ok}}
+      assert Catalog.clustering(catalog, @table) == {:ok, ["ts"]}
     end
   end
 

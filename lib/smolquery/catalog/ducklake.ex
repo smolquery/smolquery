@@ -543,9 +543,8 @@ defmodule Smolquery.Catalog.DuckLake do
     do: {:error, {:reserved_dataset, dataset}}
 
   def create_dataset(%__MODULE__{} = config, dataset) do
-    with {:ok, name} <- dataset_name(config, dataset),
-         {:ok, _result} <- query(config, "CREATE SCHEMA IF NOT EXISTS #{name}") do
-      :ok
+    with {:ok, name} <- dataset_name(config, dataset) do
+      commit(config, "CREATE SCHEMA IF NOT EXISTS #{name}")
     end
   end
 
@@ -565,7 +564,7 @@ defmodule Smolquery.Catalog.DuckLake do
          {:ok, columns} <- Schema.column_definitions(schema),
          {:ok, definitions} <- validated_materialized(schema),
          {:ok, existed} <- exists?(config, table),
-         {:ok, _result} <- query(config, "CREATE TABLE IF NOT EXISTS #{name} (#{columns})") do
+         :ok <- commit(config, "CREATE TABLE IF NOT EXISTS #{name} (#{columns})") do
       if existed, do: :ok, else: record_materialized(config, table, definitions)
     end
   end
@@ -650,7 +649,7 @@ defmodule Smolquery.Catalog.DuckLake do
         if nullable, do: [defined], else: [defined, required]
       end)
 
-    transaction(config, statements)
+    transact(config, statements)
   end
 
   @impl Catalog
@@ -1437,7 +1436,7 @@ defmodule Smolquery.Catalog.DuckLake do
          :ok <- maybe_ensure_retention_table(config, options) do
       case option_statements(config, dataset, table, options) do
         [] -> :ok
-        statements -> transaction(config, statements)
+        statements -> transact(config, statements)
       end
     end
   end
@@ -1786,7 +1785,7 @@ defmodule Smolquery.Catalog.DuckLake do
     now = System.system_time(:millisecond)
     created_at = connection.created_at || now
 
-    transaction(config, [
+    transact(config, [
       delete_connection_sql(config, connection.name),
       "INSERT INTO #{connections_table(config.catalog)} " <>
         "(name, host, port, database_name, username, secret, sslmode, created_at, updated_at, " <>
@@ -1829,7 +1828,7 @@ defmodule Smolquery.Catalog.DuckLake do
 
   @impl Catalog
   def delete_connection(%__MODULE__{} = config, name) do
-    with {:ok, _result} <- query(config, delete_connection_sql(config, name)), do: :ok
+    commit(config, delete_connection_sql(config, name))
   end
 
   defp nullable_string(nil), do: "NULL"
