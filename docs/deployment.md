@@ -183,9 +183,12 @@ scanning 64 GB in 1.75 s warm.
 
 **What is not yet there.** Distribution between a pod and its runners is
 plain TCP inside the VPC; `inet_tls_dist` with a runner certificate is
-T-684. The policy's defaults (`SMOLQUERY_BURST_MIN_SCAN_BYTES`,
-`SMOLQUERY_BURST_TARGET_BYTES`) are the plan's starting points until the
-bench at 100, 500 and 1,000 runners (T-683) sets them.
+T-684. The policy's defaults come from the bench on 9 GB and 92 GB tables
+(T-683, the cost model on PL-77): `SMOLQUERY_BURST_MIN_SCAN_BYTES` 8 GiB,
+`SMOLQUERY_BURST_TARGET_BYTES` 256 MiB, `SMOLQUERY_BURST_MAX_PER_JOB` 64.
+Fewer than about 25 runners lost to the cluster on every shape, 50 to 100
+was flat, and high-cardinality groups are bound by the coordinator's merge
+(T-685) whatever the count.
 
 ## When a peer dies without closing its sockets
 

@@ -74,7 +74,7 @@ defmodule Smolquery.Burst do
   @policy_defaults [
     default: :auto,
     min_scan_bytes: 8_589_934_592,
-    target_bytes: 1_073_741_824,
+    target_bytes: 268_435_456,
     max_per_job: 64,
     wait_ms: 10_000,
     retry_floor_ms: 5_000,
