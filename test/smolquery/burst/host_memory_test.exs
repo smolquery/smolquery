@@ -54,9 +54,4 @@ defmodule Smolquery.Burst.HostMemoryTest do
     write(root, "proc/meminfo", "garbage\n")
     assert HostMemory.bytes(env: %{}, root: root) == :error
   end
-
-  test "this host reports something" do
-    assert {:ok, bytes} = HostMemory.bytes()
-    assert bytes > 0
-  end
 end

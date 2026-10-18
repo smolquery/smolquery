@@ -1022,8 +1022,9 @@ if otlp_endpoint && System.get_env("OTEL_TRACES_EXPORTER", "otlp") != "none" do
 end
 
 # Burst (PL-77): the pool of ephemeral runners a query can fan out to. Set
-# the backend to lease runners from this node; a runner itself needs none of
-# these, it learns everything from its assignment.
+# the backend to lease runners from this node. A runner reads only the
+# runner-side keys below (lifetime, its own engine limits) from its
+# environment; everything else reaches it in its assignment.
 if burst_backend = System.get_env("SMOLQUERY_BURST_BACKEND") do
   backend =
     Smolquery.RuntimeConfig.enum!("SMOLQUERY_BURST_BACKEND", burst_backend, [

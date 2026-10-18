@@ -151,7 +151,7 @@ defmodule Smolquery.BurstTest do
       {:ok, bytes} = Burst.HostMemory.bytes()
 
       assert Burst.runner_limits(coordinator) == [
-               memory_limit: "#{div(bytes * 3, 4 * 1024 * 1024)}MB",
+               memory_limit: "#{div(bytes * 3, 4 * 1024 * 1024)}MiB",
                threads: System.schedulers_online()
              ]
     end
@@ -164,7 +164,7 @@ defmodule Smolquery.BurstTest do
       System.put_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "10240")
 
       assert Burst.runner_limits(coordinator) == [
-               memory_limit: "7680MB",
+               memory_limit: "7680MiB",
                threads: System.schedulers_online()
              ]
     end
@@ -183,7 +183,7 @@ defmodule Smolquery.BurstTest do
       System.put_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "4096")
 
       assert Burst.runner_limits(coordinator) == [
-               memory_limit: "3072MB",
+               memory_limit: "3072MiB",
                threads: System.schedulers_online()
              ]
     end

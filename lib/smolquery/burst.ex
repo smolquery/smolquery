@@ -53,8 +53,8 @@ defmodule Smolquery.Burst do
   not spill before the host kills it (T-695). So a runner sizes its engine
   from its own host (`runner_limits/1`): memory from `runner_memory_limit`,
   else three quarters of what the host gives it
-  (`Smolquery.Burst.HostMemory`: the Lambda function's size, the cgroup
-  limit, or the machine's total), leaving the rest to the BEAM, DuckDB's
+  (`Smolquery.Burst.HostMemory`: the Lambda function's size, else the
+  smaller of the cgroup limit and the machine's total), leaving the rest to the BEAM, DuckDB's
   untracked buffers and the partial; threads from `runner_threads`, else
   the VM's online schedulers. The coordinator's memory limit survives only
   on a host that reports nothing. The two keys come from the runner's own
@@ -190,7 +190,7 @@ defmodule Smolquery.Burst do
 
   defp host_memory_limit do
     case __MODULE__.HostMemory.bytes() do
-      {:ok, bytes} -> "#{div(bytes * 3, 4 * 1024 * 1024)}MB"
+      {:ok, bytes} -> "#{max(div(bytes * 3, 4 * 1024 * 1024), 1)}MiB"
       :error -> nil
     end
   end

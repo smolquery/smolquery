@@ -193,8 +193,12 @@ mutual TLS: change both values to `true` before you apply the overlay.
 Burst (PL-77) lets a query fan its sealed scan out to ephemeral runners
 leased through a FLAME pool (`Smolquery.Burst`). A runner is this same
 release booted by a backend with `FLAME_PARENT` in its environment; it starts
-no service, joins no cluster and holds no internal secret. Nothing here is
-read on a runner: it learns everything from the backend's assignment.
+no service, joins no cluster and holds no internal secret. A runner learns
+almost everything from the backend's assignment; what it reads from its own
+environment is `SMOLQUERY_BURST_MAX_LIFETIME_MS` (which the assignment
+sets), `SMOLQUERY_BURST_RUNNER_MEMORY_LIMIT` and
+`SMOLQUERY_BURST_RUNNER_THREADS` (which on Lambda the function's
+environment sets). Every other row is read on the node that leases.
 
 | variable | effect (default) |
 |---|---|
@@ -202,7 +206,7 @@ read on a runner: it learns everything from the backend's assignment.
 | `SMOLQUERY_BURST_LAMBDA_FUNCTION` | With the `lambda` backend: the function's name. Required |
 | `SMOLQUERY_BURST_LAMBDA_REGION` | With the `lambda` backend: the function's region. Required |
 | `SMOLQUERY_BURST_MAX_LIFETIME_MS` | How long a runner lives before it stops itself (`840000`, 14 minutes; at most what a timer takes, 4294967295), under the host's own cap (15 minutes on Lambda), so a runner ends with an orderly shutdown instead of the host's mid-scan kill and timed-out invocation; a shard on it fails as unreachable, which the scatter retries on a peer. The parent passes it in the runner's assignment; on a runner it is read from the environment |
-| `SMOLQUERY_BURST_RUNNER_MEMORY_LIMIT` | On a runner: its engine's DuckDB `memory_limit`, a size such as `7GB`, in place of the coordinator's worker limit (unset: three quarters of the host's memory, read from `AWS_LAMBDA_FUNCTION_MEMORY_SIZE` on Lambda, else the cgroup limit or `MemTotal`; the coordinator's limit only when the host reports nothing). The rest is for the BEAM, DuckDB's untracked buffers and the partial. A runner's host is its own, so the coordinator's `SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT` says nothing about it (T-695). Set in the runner's environment: on Lambda, the function's environment variables |
+| `SMOLQUERY_BURST_RUNNER_MEMORY_LIMIT` | On a runner: its engine's DuckDB `memory_limit`, a size such as `7GB`, in place of the coordinator's worker limit (unset: three quarters of the host's memory, read from `AWS_LAMBDA_FUNCTION_MEMORY_SIZE` on Lambda, else the smaller of the cgroup limit and `MemTotal`; the coordinator's limit only when the host reports nothing). The rest is for the BEAM, DuckDB's untracked buffers and the partial. A runner's host is its own, so the coordinator's `SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT` says nothing about it (T-695). Set in the runner's environment: on Lambda, the function's environment variables |
 | `SMOLQUERY_BURST_RUNNER_THREADS` | On a runner: its engine's DuckDB `threads` (unset: the runner VM's online schedulers), in place of the coordinator's `SMOLQUERY_DISTRIBUTED_WORKER_THREADS`. Set in the runner's environment, as above |
 | `SMOLQUERY_DIST_PORT` | Pins the Erlang distribution listener to one port (unset: an ephemeral one, found through epmd), so a burst runner outside the pod network can be let in on it. `rel/env.sh.eex` applies it to `start` and `daemon` only; `bin/smolquery rpc` and `remote` in the same pod keep an ephemeral port |
 | `SMOLQUERY_BURST_MAX` | The most runners this node holds at once (`64`). Per node, not per deployment |

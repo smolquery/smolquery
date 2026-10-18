@@ -157,20 +157,20 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
     end
 
     test "on a runner the host's limits replace the coordinator's", %{spec: spec} do
-      as_runner(runner_memory_limit: "7GB", runner_threads: 6)
+      FlameParent.as_runner(runner_memory_limit: "7GB", runner_threads: 6)
 
       options = PartialWorker.standalone_options(spec)
       assert options[:settings] == [memory_limit: "7GB", threads: 6]
     end
 
     test "on a runner with no overrides the host sizes the engine, not the spec", %{spec: spec} do
-      as_runner([])
+      FlameParent.as_runner([])
 
       assert [memory_limit: memory_limit, threads: threads] =
                PartialWorker.standalone_options(spec)[:settings]
 
       refute memory_limit == spec.memory_limit
-      assert memory_limit =~ ~r/^\d+MB$/
+      assert memory_limit =~ ~r/^\d+MiB$/
       assert threads == System.schedulers_online()
     end
   end
@@ -320,18 +320,5 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
         store: {Store.S3, Keyword.put(options, :staging_dir, "/tmp/s")}
       )
     end
-  end
-
-  defp as_runner(burst_config) do
-    previous = Application.get_env(:smolquery, Smolquery.Burst)
-
-    on_exit(fn ->
-      if previous,
-        do: Application.put_env(:smolquery, Smolquery.Burst, previous),
-        else: Application.delete_env(:smolquery, Smolquery.Burst)
-    end)
-
-    FlameParent.put_env()
-    Application.put_env(:smolquery, Smolquery.Burst, burst_config)
   end
 end
