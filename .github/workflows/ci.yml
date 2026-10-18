@@ -70,21 +70,17 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-      minio:
-        # bitnami's image (unlike minio/minio) runs `server` off env vars alone —
-        # GitHub Actions service containers cannot override a command/args.
-        # bitnamilegacy, not bitnami: Broadcom moved bitnami/minio's free
-        # tags off Docker Hub in 2025 ("manifest unknown" on :latest);
-        # bitnamilegacy is the frozen free mirror.
-        image: bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
+      rustfs:
+        image: rustfs/rustfs:1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
         env:
-          MINIO_ROOT_USER: smolquery
-          MINIO_ROOT_PASSWORD: smolquery-secret
-          MINIO_DEFAULT_BUCKETS: smolquery-store-s3-test
+          RUSTFS_ACCESS_KEY: smolquery
+          RUSTFS_SECRET_KEY: smolquery-secret
+          RUSTFS_ADDRESS: 0.0.0.0:9000
+          RUSTFS_CONSOLE_ENABLE: "false"
         ports:
           - 9000:9000
         options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-cmd "curl -s -o /dev/null http://localhost:9000/"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10

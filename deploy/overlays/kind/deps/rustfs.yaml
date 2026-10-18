@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustfs
+  namespace: smolquery
+spec:
+  selector:
+    app: rustfs
+  ports:
+    - name: api
+      port: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustfs
+  namespace: smolquery
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rustfs
+  template:
+    metadata:
+      labels:
+        app: rustfs
+    spec:
+      containers:
+        - name: rustfs
+          image: rustfs/rustfs:1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+          env:
+            - name: RUSTFS_ACCESS_KEY
+              value: smolquery
+            - name: RUSTFS_SECRET_KEY
+              value: smolquery-secret
+            - name: RUSTFS_ADDRESS
+              value: 0.0.0.0:9000
+            - name: RUSTFS_CONSOLE_ENABLE
+              value: "false"
+            - name: RUSTFS_VOLUMES
+              value: /data
+          ports:
+            - containerPort: 9000
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - >-
+                    n=0;
+                    until curl -s -o /dev/null -w '%{http_code}' -X PUT
+                    --aws-sigv4 aws:amz:us-east-1:s3
+                    --user "$RUSTFS_ACCESS_KEY:$RUSTFS_SECRET_KEY"
+                    http://localhost:9000/smolquery-sealed | grep -qE '^(200|409)$';
+                    do n=$((n + 1)); [ "$n" -ge 60 ] && exit 1; sleep 1; done
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  curl -sf -o /dev/null -I
+                  --aws-sigv4 aws:amz:us-east-1:s3
+                  --user "$RUSTFS_ACCESS_KEY:$RUSTFS_SECRET_KEY"
+                  http://localhost:9000/smolquery-sealed
+            periodSeconds: 2
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}

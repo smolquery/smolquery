@@ -401,7 +401,7 @@ store: {Smolquery.Segments.Store.S3,
         bucket: "smolquery-sealed",
         access_key_id: "...",
         secret_access_key: "...",
-        endpoint: "http://minio:9000",
+        endpoint: "http://rustfs:9000",
         staging_dir: "/mnt/scratch/sealed-staging"}
 ```
 
@@ -434,7 +434,7 @@ auto` instead of static keys. They load the `aws` extension that this provider
 comes from. `REFRESH auto` keeps the long-lived storage-service engine working
 past the expiry of the temporary credentials it started with.
 
-MinIO and other non-AWS stores keep static keys. They have no credential chain
+RustFS, MinIO, and other non-AWS stores keep static keys. They have no credential chain
 to consult.
 
 `buffer_base_url` is where the sealer reaches `HotServer` to pull manifests and

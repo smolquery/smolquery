@@ -21,7 +21,7 @@ defmodule Smolquery.Cluster.KindClusterTest do
   So every destructive test restores the fleet in `on_exit` and waits for the
   ring to come back — order-independence is arranged rather than assumed. Each
   test also gets its own dataset, because the buffer PVCs, the Postgres catalog,
-  and MinIO all outlive a redeploy and a fixed name silently accumulates rows
+  and RustFS all outlive a redeploy and a fixed name silently accumulates rows
   across runs.
 
   The sealing clauses share one `setup_all` dataset: a seal is bounded by
@@ -88,11 +88,11 @@ defmodule Smolquery.Cluster.KindClusterTest do
       assert Kind.total_rows(dataset, tables) == {:ok, 400}
     end
 
-    test "seals to MinIO through the Postgres catalog and reads back over s3://", context do
+    test "seals to RustFS through the Postgres catalog and reads back over s3://", context do
       %{dataset: dataset, tables: tables} = context
 
       assert Eventually.until(fn -> Kind.sealed_object(dataset) != nil end, 60, 3_000),
-             "no sealed segment appeared in MinIO within 180s"
+             "no sealed segment appeared in RustFS within 180s"
 
       assert Kind.total_rows(dataset, tables) == {:ok, 400}
     end
@@ -101,7 +101,7 @@ defmodule Smolquery.Cluster.KindClusterTest do
       %{dataset: dataset, first: first} = context
 
       assert Eventually.until(fn -> Kind.sealed_object(dataset) != nil end, 60, 3_000),
-             "no sealed segment appeared in MinIO within 180s"
+             "no sealed segment appeared in RustFS within 180s"
 
       assert {:ok, sum} = Kind.count("SELECT sum(id) AS n FROM #{dataset}.#{first}", "n")
       assert sum > 0

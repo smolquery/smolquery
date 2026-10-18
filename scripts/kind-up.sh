@@ -5,7 +5,7 @@
 #   kind (default)  — one api/ingest/query/web pod, a 3-pod buffer
 #                     StatefulSet, 2 storage pods
 #   kind-symmetric  — three identical all-role servers
-# Both get Postgres (DuckLake catalog + libcluster discovery) and MinIO as
+# Both get Postgres (DuckLake catalog + libcluster discovery) and RustFS as
 # the sealed tier.
 set -euo pipefail
 
@@ -62,8 +62,8 @@ kubectl -n smolquery rollout restart $smolquery_sts
 echo "==> waiting for postgres"
 kubectl -n smolquery rollout status statefulset/postgres --timeout=180s
 
-echo "==> waiting for minio"
-kubectl -n smolquery rollout status deployment/minio --timeout=180s
+echo "==> waiting for rustfs"
+kubectl -n smolquery rollout status deployment/rustfs --timeout=180s
 
 for sts in $smolquery_sts; do
   echo "==> waiting for $sts"

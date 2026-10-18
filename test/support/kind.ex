@@ -214,20 +214,32 @@ defmodule Smolquery.Test.Kind do
   end
 
   @doc """
-  Whether a sealed parquet object for `dataset` has appeared in MinIO.
+  The key of a sealed parquet object for `dataset` in RustFS, or `nil`.
+
+  It lists the bucket over S3 from inside the RustFS pod, so it does not
+  depend on how RustFS lays objects out on disk.
   """
   @spec sealed_object(String.t()) :: String.t() | nil
   def sealed_object(dataset) do
     case kubectl([
            "exec",
-           "deploy/minio",
+           "deploy/rustfs",
            "--",
            "sh",
            "-c",
-           "for f in /data/smolquery-sealed/#{dataset}/*/*.parquet; do [ -e \"$f\" ] && echo \"$f\" && break; done; :"
+           "curl -sf --aws-sigv4 aws:amz:us-east-1:s3 " <>
+             "--user \"$RUSTFS_ACCESS_KEY:$RUSTFS_SECRET_KEY\" " <>
+             "'http://localhost:9000/smolquery-sealed?list-type=2&prefix=#{dataset}/'"
          ]) do
-      {output, 0} -> output |> String.trim() |> presence()
+      {output, 0} -> parquet_key(output)
       _other -> nil
+    end
+  end
+
+  defp parquet_key(listing) do
+    case Regex.run(~r{<Key>([^<]+\.parquet)</Key>}, listing, capture: :all_but_first) do
+      [key] -> key
+      nil -> nil
     end
   end
 
@@ -343,7 +355,7 @@ defmodule Smolquery.Test.Kind do
   end
 
   @doc """
-  A dataset name no other run shares — buffers (PVCs), the catalog, and MinIO all
+  A dataset name no other run shares — buffers (PVCs), the catalog, and RustFS all
   outlive a redeploy, so a fixed name accumulates rows across runs.
   """
   @spec unique_dataset(String.t()) :: String.t()
@@ -375,9 +387,6 @@ defmodule Smolquery.Test.Kind do
   defp base_url, do: System.get_env("BASE", "http://localhost:8080")
 
   defp api_key, do: System.get_env("SMOLQUERY_API_KEY", "kind-only-api-key")
-
-  defp presence(""), do: nil
-  defp presence(value), do: value
 
   defp to_integer(value) when is_integer(value), do: value
   defp to_integer(value) when is_binary(value), do: String.to_integer(value)

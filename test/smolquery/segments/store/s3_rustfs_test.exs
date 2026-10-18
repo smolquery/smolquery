@@ -1,6 +1,6 @@
-defmodule Smolquery.Segments.Store.S3MinioTest do
+defmodule Smolquery.Segments.Store.S3RustfsTest do
   @moduledoc """
-  Milestone 8 L3: `Store.S3` against a real S3-compatible service (MinIO in
+  Milestone 8 L3: `Store.S3` against a real S3-compatible service (RustFS in
   CI/kind, per PL-11 D7) — the behavior contract `Store.Local` already has
   tests for, plus the one thing only an object store needs proven: a
   segment `Store.S3.put/3` writes is readable back by DuckDB's `httpfs`

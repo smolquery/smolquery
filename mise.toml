@@ -43,28 +43,38 @@ done
 """
 
 [tasks.services]
-description = "Bring up what the integration suite needs: epmd, Postgres, MinIO"
+description = "Bring up what the integration suite needs: epmd, Postgres, RustFS"
 run = """
 epmd -daemon 2>/dev/null || true
 nc -z localhost 5432 2>/dev/null && echo "postgres: up" ||
   echo "postgres: DOWN — start your local Postgres on :5432 (postgres/postgres)"
-nc -z localhost 9000 2>/dev/null && echo "minio: up" ||
-  docker run -d --rm --name smolquery-minio -p 9000:9000 \
-    -e MINIO_ROOT_USER=smolquery -e MINIO_ROOT_PASSWORD=smolquery-secret \
-    -e MINIO_DEFAULT_BUCKETS=smolquery-store-s3-test \
-    bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
+nc -z localhost 9000 2>/dev/null && echo "rustfs: up" ||
+  docker run -d --rm --name smolquery-rustfs -p 9000:9000 \
+    -e RUSTFS_ACCESS_KEY=smolquery -e RUSTFS_SECRET_KEY=smolquery-secret \
+    -e RUSTFS_ADDRESS=0.0.0.0:9000 -e RUSTFS_CONSOLE_ENABLE=false \
+    rustfs/rustfs:1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+for _ in $(seq 1 30); do
+  case "$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+    --aws-sigv4 aws:amz:us-east-1:s3 --user smolquery:smolquery-secret \
+    http://localhost:9000/smolquery-store-s3-test)" in
+    200|409) echo "rustfs: bucket smolquery-store-s3-test ready"; exit 0 ;;
+  esac
+  sleep 1
+done
+echo "rustfs: could not create bucket smolquery-store-s3-test" >&2
+exit 1
 """
 
 [tasks.services_stop]
-description = "Stop the MinIO container this repo started"
-run = "docker stop smolquery-minio 2>/dev/null || true"
+description = "Stop the RustFS container this repo started"
+run = "docker stop smolquery-rustfs 2>/dev/null || true"
 
 [tasks.test]
 description = "The fast suite"
 run = "mix test"
 
 [tasks.test_integration]
-description = "The fast suite plus DuckDB extensions, real HTTP, Postgres, and MinIO"
+description = "The fast suite plus DuckDB extensions, real HTTP, Postgres, and RustFS"
 depends = ["services"]
 run = "mix test --include integration"
 

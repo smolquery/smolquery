@@ -247,7 +247,7 @@ of a deployment:
 ### Local cluster (kind)
 
 `deploy/` holds kustomize manifests: `base/` is the smolquery fleet itself,
-`overlays/kind/` adds what local dev needs around it (Postgres, MinIO,
+`overlays/kind/` adds what local dev needs around it (Postgres, RustFS,
 NodePorts, dev TLS certs). The Kind overlays intentionally use the mutable
 `smolquery:dev` image for local iteration; production uses the image-pinned base
 manifest attached to a release, integrated with its required Secret, Postgres
@@ -266,8 +266,8 @@ mix test --only cluster # ingest, fan-out, seal, drain, kill
 | --- | --- | --- | --- |
 | `smolquery-api` | 1 | `api,ingest,query,web` | none (`emptyDir`) |
 | `smolquery-buffer` | 3 | `buffer` | PVC — the acked-but-unsealed tail lives here |
-| `smolquery-storage` | 2 | `storage` | none — sealed segments in MinIO, catalog in Postgres |
-| `postgres` / `minio` | 1 each | — | kind-overlay only |
+| `smolquery-storage` | 2 | `storage` | none — sealed segments in RustFS, catalog in Postgres |
+| `postgres` / `rustfs` | 1 each | — | kind-overlay only |
 
 Query jobs run on the API pod — it holds the `query` role. A distributed
 query shards its scan across every `query`-role node in the cluster, so
@@ -313,15 +313,16 @@ ambient context from another cluster.
 
 ```sh
 mix test                        # fast suite
-mix test --include integration  # + DuckDB extensions, real HTTP, :peer nodes, Postgres, MinIO
+mix test --include integration  # + DuckDB extensions, real HTTP, :peer nodes, Postgres, RustFS
 mix test --only cluster         # just the kind-cluster suite (see above)
 ```
 
 Integration-tagged tests are excluded by default: they download DuckDB
 extensions, serve Parquet over a real HTTP server, boot `:peer` nodes (`epmd`
 must be running: `epmd -daemon`), and expect a Postgres on `localhost:5432`
-(`postgres`/`postgres`, override with `TEST_POSTGRES_*`) and a MinIO on
+(`postgres`/`postgres`, override with `TEST_POSTGRES_*`) and a RustFS on
 `localhost:9000` (`smolquery`/`smolquery-secret`, override with `TEST_S3_*`).
+`mise run services` starts both RustFS and its test bucket.
 
 The DuckLake catalog suite creates and uses a `smolquery_test` database rather
 than sharing `postgres`. DuckLake's metadata tables carry no primary keys, and
@@ -333,10 +334,14 @@ per-database, so a database of its own settles it; override with
 
 ```sh
 docker run -d --rm -p 9000:9000 \
-  -e MINIO_ROOT_USER=smolquery -e MINIO_ROOT_PASSWORD=smolquery-secret \
-  -e MINIO_DEFAULT_BUCKETS=smolquery-store-s3-test \
-  bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
+  -e RUSTFS_ACCESS_KEY=smolquery -e RUSTFS_SECRET_KEY=smolquery-secret \
+  -e RUSTFS_ADDRESS=0.0.0.0:9000 -e RUSTFS_CONSOLE_ENABLE=false \
+  rustfs/rustfs:1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
 ```
+
+RustFS does not create a bucket from an environment variable. The S3 store
+test creates `smolquery-store-s3-test` itself. The kind overlay creates
+`smolquery-sealed` in a `postStart` hook.
 
 `:cluster`-tagged tests go further: they need the whole fleet on real distinct
 hosts, so they run against the kind cluster rather than starting anything
