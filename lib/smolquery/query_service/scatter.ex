@@ -779,17 +779,20 @@ defmodule Smolquery.QueryService.Scatter do
   end
 
   defp landed(%{spilled: %{key: key, bytes: bytes, parts: [_ | _] = parts}}, _dir, _index),
-    do: %{path: nil, spilled: key, bytes: bytes, parts: parts}
+    do: partial(nil, key, bytes, parts)
 
   defp landed(%{spilled: %{location: location, key: key, bytes: bytes}}, _dir, _index),
-    do: %{path: location, spilled: key, bytes: bytes, parts: nil}
+    do: partial(location, key, bytes, nil)
 
   defp landed(%{parquet: parquet}, partials_dir, index) do
     path = Path.join(partials_dir, "partial-#{index}.parquet")
     File.write!(path, parquet)
 
-    %{path: path, spilled: nil, bytes: byte_size(parquet), parts: nil}
+    partial(path, nil, byte_size(parquet), nil)
   end
+
+  defp partial(path, key, bytes, parts),
+    do: %{path: path, spilled: key, bytes: bytes, parts: parts}
 
   defp concurrency(shards, runner_shards, %Runtime{burst: %{max_inflight: max_inflight}}),
     do: max(length(shards) - runner_shards + min(runner_shards, max_inflight), 1)
