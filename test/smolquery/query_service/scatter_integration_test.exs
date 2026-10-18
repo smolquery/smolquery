@@ -703,6 +703,51 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert {:ok, []} = Store.list(seed_store(tmp_dir), "burst-partials")
   end
 
+  @tag burst: [max: 4, spill: true, spill_inline_max_bytes: 0, merge_fan_in: 2]
+  test "spilled partials merge in a tree on runners before the final, and leave nothing behind (T-685)",
+       %{control: control, distributed: distributed, tmp_dir: tmp_dir} do
+    sql =
+      "SELECT name, count(*) AS c, sum(id) AS s FROM analytics.events GROUP BY name ORDER BY name"
+
+    both(control, distributed, sql, burst: 4)
+
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, sql, burst: 4, trace: true)
+
+    assert %{peers: 3, burst: burst} = job.scatter
+    assert burst >= 3
+
+    assert [tree] = Enum.filter(job.trace, &(&1.name == :tree_merge))
+    assert %{outcome: :ok, levels: 1, shards: merge_shards} = tree.meta
+    assert merge_shards == div(burst + 1, 2)
+
+    merges = Enum.filter(job.trace, &(&1.name == :shard and Map.has_key?(&1.meta, :merge_level)))
+    assert length(merges) == merge_shards
+
+    for merge <- merges do
+      assert %{kind: :runner, merge_level: 1, files: 0, engine: :standalone, rows: rows} =
+               merge.meta
+
+      assert merge.meta.inputs in [1, 2] and rows > 0
+    end
+
+    assert {:ok, []} = Store.list(seed_store(tmp_dir), "burst-partials")
+  end
+
+  @tag burst: [max: 4, spill: true, spill_inline_max_bytes: 0]
+  test "under the fan-in the coordinator merges the spilled partials itself (T-685)",
+       %{distributed: distributed} do
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, "SELECT count(*) AS n, max(id) AS m FROM analytics.events",
+               burst: 4,
+               trace: true
+             )
+
+    assert %{burst: burst} = job.scatter
+    assert burst > 0
+    assert [] = Enum.filter(job.trace, &(&1.name == :tree_merge))
+  end
+
   @tag burst: [dead: true, spill: true, spill_inline_max_bytes: 0]
   test "runner shards retried on peers leave nothing under the spill prefix (T-678)",
        %{distributed: distributed, tmp_dir: tmp_dir} do

@@ -63,6 +63,20 @@ defmodule Smolquery.QueryService.Scatter do
      The spans ride the job's phase collection, so they reach the
      `trace: true` answer, the query UI waterfall and the OpenTelemetry
      trace without a context crossing to the worker.
+  7. Partials that spilled to the store merge in a tree before the final
+     (T-685, PL-77 D6). The coordinator's merge over a hundred runners'
+     group tables was the floor of every high-cardinality shape on the 92 GB
+     bench (T-683): 2 to 3 GB of partials through one engine. So while more
+     than `burst.merge_fan_in` partials sit in the store, the coordinator
+     deals them in groups of that many to runners, each of which runs the
+     decomposition's re-partial (`Decomposer.repartial_sql/2`) over its
+     group and answers one partial of the same shape, spilled or inline as
+     any shard's. A level's inputs are deleted once the level has answered;
+     the next level merges what came back with the inline partials, until
+     few enough remain for the final. A merge shard is a `shard` span with
+     `merge_level` and `inputs`, and the levels sit under one `tree_merge`
+     span. A level that fails leaves its inputs where they are and the
+     coordinator merges them itself, as before the tree.
 
   ## PoC limits
 
@@ -112,6 +126,12 @@ defmodule Smolquery.QueryService.Scatter do
   @type target ::
           %{index: non_neg_integer(), kind: :peer, node: node()}
           | %{index: non_neg_integer(), kind: :runner, pool: atom()}
+          | %{
+              index: non_neg_integer(),
+              kind: :runner,
+              pool: atom(),
+              merge: %{level: pos_integer(), locations: [String.t()]}
+            }
 
   @typedoc """
   How a scattered job was answered: its shard count and merged partial
@@ -369,16 +389,18 @@ defmodule Smolquery.QueryService.Scatter do
     %{shards: shards} = dealt
     partials_dir = dir(job_id)
     File.mkdir_p!(partials_dir)
+    context = context(runtime, decomposition, ref, schema, dealt, job_id, timeout_ms)
 
     try do
       gathered =
         Trace.span(:gather, &phase_meta(%{shards: length(shards)}, &1), fn ->
-          gather(runtime, decomposition, ref, schema, dealt, partials_dir, job_id, timeout_ms)
+          gather(context, partials_dir)
         end)
 
       case gathered do
         {:ok, partials} ->
-          answer(runtime, connection, decomposition, dealt, partials, job_id)
+          inputs = fan_in(context, partials_dir, partials)
+          answer(runtime, connection, decomposition, dealt, partials, inputs, job_id)
 
         {:error, reason} ->
           delete_spilled(runtime, spill_keys(runtime, dealt, job_id))
@@ -395,13 +417,13 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp answer(runtime, connection, decomposition, dealt, partials, job_id) do
+  defp answer(runtime, connection, decomposition, dealt, partials, inputs, job_id) do
     merged =
       Trace.span(:merge, &phase_meta(%{}, &1), fn ->
-        merge(runtime, connection, decomposition, partials)
+        merge(runtime, connection, decomposition, inputs)
       end)
 
-    delete_spilled(runtime, cleanup_keys(runtime, dealt, partials, job_id))
+    delete_spilled(runtime, cleanup_keys(runtime, dealt, partials, inputs, job_id))
 
     case merged do
       {:ok, frame} ->
@@ -452,10 +474,10 @@ defmodule Smolquery.QueryService.Scatter do
         do: spill_key(runtime, job_id, index)
       )
 
-  defp cleanup_keys(%Runtime{store: nil}, _dealt, _partials, _job_id), do: []
+  defp cleanup_keys(%Runtime{store: nil}, _dealt, _partials, _inputs, _job_id), do: []
 
-  defp cleanup_keys(runtime, %{shards: shards}, partials, job_id) do
-    reported = for %{spilled: key} <- partials, is_binary(key), do: key
+  defp cleanup_keys(runtime, %{shards: shards}, partials, inputs, job_id) do
+    reported = for %{spilled: key} <- inputs, is_binary(key), do: key
     answered = for %{kind: :runner, index: index} <- partials, do: index
 
     silent =
@@ -488,7 +510,7 @@ defmodule Smolquery.QueryService.Scatter do
     end)
   end
 
-  defp gather(runtime, decomposition, ref, schema, dealt, partials_dir, job_id, timeout_ms) do
+  defp context(runtime, decomposition, ref, schema, dealt, job_id, timeout_ms) do
     %{shards: shards, runner_shards: runner_shards} = dealt
 
     base = %{
@@ -498,22 +520,114 @@ defmodule Smolquery.QueryService.Scatter do
       params: decomposition.params
     }
 
-    context = %{
+    %{
       runtime: runtime,
+      decomposition: decomposition,
       job_id: job_id,
       deadline_ms: deadline_ms(timeout_ms),
       base: base,
       runner_base: runner_base(runner_shards, base, runtime),
       node_files: node_files(shards),
-      peers: shards |> peer_shards() |> Enum.map(&elem(&1, 0))
+      peers: shards |> peer_shards() |> Enum.map(&elem(&1, 0)),
+      shards: shards,
+      runner_shards: runner_shards
     }
+  end
 
+  defp gather(%{shards: shards, runner_shards: runner_shards, runtime: runtime} = context, dir) do
     shards
     |> Task.async_stream(fn {target, files} -> shard(target, files, context) end,
       max_concurrency: concurrency(shards, runner_shards, runtime),
       ordered: false,
       timeout: :infinity
     )
+    |> collect(context, dir)
+  end
+
+  defp fan_in(%{runner_base: nil}, _dir, partials), do: partials
+
+  defp fan_in(%{runtime: %Runtime{burst: %{merge_fan_in: fan_in}}} = context, dir, partials) do
+    if fan_in < 2 or Enum.count(partials, &is_binary(&1.spilled)) <= fan_in do
+      partials
+    else
+      {inputs, _stats} =
+        Trace.span(:tree_merge, &tree_meta/1, fn ->
+          levels(context, dir, partials, %{
+            level: 1,
+            shards: 0,
+            next_index: length(context.shards)
+          })
+        end)
+
+      inputs
+    end
+  end
+
+  defp levels(context, dir, partials, stats) do
+    %{runtime: %Runtime{burst: %{merge_fan_in: fan_in, pool: pool}}} = context
+    {spilled, kept} = Enum.split_with(partials, &is_binary(&1.spilled))
+
+    if length(spilled) <= fan_in do
+      {partials, Map.merge(stats, %{outcome: :ok, levels: stats.level - 1})}
+    else
+      descend(context, dir, {spilled, kept}, merge_targets(spilled, fan_in, pool, stats), stats)
+    end
+  end
+
+  defp merge_targets(spilled, fan_in, pool, stats) do
+    spilled
+    |> Enum.chunk_every(fan_in)
+    |> Enum.with_index(fn group, offset ->
+      merge = %{level: stats.level, locations: Enum.map(group, & &1.path)}
+      {%{kind: :runner, pool: pool, index: stats.next_index + offset, merge: merge}, []}
+    end)
+  end
+
+  defp descend(%{runtime: runtime} = context, dir, {spilled, kept}, targets, stats) do
+    case level(context, dir, targets) do
+      {:ok, merged} ->
+        delete_spilled(runtime, Enum.map(spilled, & &1.spilled))
+        levels(context, dir, kept ++ merged, advanced(stats, length(targets)))
+
+      {:error, reason} ->
+        Logger.warning(
+          "tree merge level #{stats.level} fell back to the coordinator: #{inspect(reason)}"
+        )
+
+        delete_spilled(
+          runtime,
+          for({target, _files} <- targets, do: spill_key(runtime, context.job_id, target.index))
+        )
+
+        {kept ++ spilled, Map.merge(stats, %{outcome: :error, levels: stats.level - 1})}
+    end
+  end
+
+  defp advanced(stats, shards) do
+    %{
+      level: stats.level + 1,
+      shards: stats.shards + shards,
+      next_index: stats.next_index + shards
+    }
+  end
+
+  defp level(%{runtime: runtime} = context, dir, targets) do
+    targets
+    |> Task.async_stream(fn {target, files} -> shard(target, files, context) end,
+      max_concurrency: min(length(targets), runtime.burst.max_inflight),
+      ordered: false,
+      timeout: :infinity
+    )
+    |> collect(context, dir)
+  end
+
+  defp tree_meta({_inputs, %{outcome: outcome, levels: levels, shards: shards}}),
+    do: %{outcome: outcome, levels: levels, shards: shards}
+
+  defp tree_meta(raised), do: %{outcome: :error, error: error_text(raised)}
+
+  defp collect(results, %{runtime: runtime}, partials_dir) do
+    results
     |> Enum.reduce_while({:ok, []}, fn
       {:ok, {target, wait_us, {:ok, reply}}}, {:ok, partials} ->
         partial =
@@ -579,11 +693,12 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp retry_target(%{index: index}, %{peers: [_ | _] = peers} = context) do
+  defp retry_target(%{index: index} = target, %{peers: [_ | _] = peers} = context) do
     if remaining_ms(context.deadline_ms) > context.runtime.burst.retry_floor_ms do
       peers
       |> Enum.at(rem(index, length(peers)))
-      |> Map.merge(%{index: index, retry: true})
+      |> Map.merge(Map.take(target, [:index, :merge]))
+      |> Map.put(:retry, true)
     end
   end
 
@@ -595,7 +710,12 @@ defmodule Smolquery.QueryService.Scatter do
   defp dispatch(target, files, context) do
     %{runtime: runtime, job_id: job_id} = context
     remaining_ms = remaining_ms(context.deadline_ms)
-    request = target |> request(files, context) |> Map.put(:timeout_ms, remaining_ms)
+
+    request =
+      target
+      |> request(files, context)
+      |> merge_sql(target, context)
+      |> Map.put(:timeout_ms, remaining_ms)
 
     Trace.span(:shard, &shard_meta(target, files, &1), fn ->
       Telemetry.timed(fn ->
@@ -632,6 +752,16 @@ defmodule Smolquery.QueryService.Scatter do
     |> Map.merge(%{files: files, allowed_paths: []})
     |> with_spill(context, index)
   end
+
+  defp merge_sql(request, %{merge: %{locations: locations}}, %{decomposition: decomposition}) do
+    Map.put(
+      request,
+      :partial_sql,
+      Decomposer.repartial_sql(decomposition, Views.read_parquet(locations))
+    )
+  end
+
+  defp merge_sql(request, _scan_target, _context), do: request
 
   defp with_spill(request, %{runtime: %Runtime{store: nil}}, _index), do: request
 
@@ -684,6 +814,15 @@ defmodule Smolquery.QueryService.Scatter do
     }
 
     base = if Map.get(target, :retry), do: Map.put(base, :retry, true), else: base
+
+    base =
+      case target do
+        %{merge: %{level: level, locations: locations}} ->
+          Map.merge(base, %{merge_level: level, inputs: length(locations)})
+
+        _scan_target ->
+          base
+      end
 
     case outcome do
       {elapsed_us, {:ok, %{rows: rows, timings: timings} = reply}} ->

@@ -236,7 +236,9 @@ defmodule Smolquery.QueryService.Decomposer do
     final_having: "",
     value_lists: false,
     rows: nil,
-    params: []
+    params: [],
+    items: [],
+    partial_columns: []
   ]
 
   @type t :: %__MODULE__{
@@ -247,7 +249,9 @@ defmodule Smolquery.QueryService.Decomposer do
           final_tail: String.t(),
           final_having: String.t(),
           value_lists: boolean(),
-          rows: nil | %{name: String.t(), limit: pos_integer(), outer_sql: String.t()}
+          rows: nil | %{name: String.t(), limit: pos_integer(), outer_sql: String.t()},
+          items: [term()],
+          partial_columns: [output()]
         }
 
   @type output :: {String.t(), String.t()}
@@ -289,7 +293,7 @@ defmodule Smolquery.QueryService.Decomposer do
          {:ok, items} <- rendered_quantiles(connection, items),
          {:ok, tail} <- tail(node, outputs),
          {:ok, having} <- having(connection, node, outputs, table_columns),
-         {:ok, partial_sql} <- partial(connection, node, keys, items, params) do
+         {:ok, partial_sql, partial_columns} <- partial(connection, node, keys, items, params) do
       {:ok,
        %__MODULE__{
          partial_sql: partial_sql,
@@ -298,9 +302,104 @@ defmodule Smolquery.QueryService.Decomposer do
          final_group: final_group(keys),
          final_having: having,
          final_tail: tail,
-         value_lists: Enum.any?(items, &match?({:by_value, kind, _item} when kind != :any, &1))
+         value_lists: Enum.any?(items, &match?({:by_value, kind, _item} when kind != :any, &1)),
+         items: items,
+         partial_columns: partial_columns
        }}
     end
+  end
+
+  @doc """
+  The query a fan-in runner runs over `from`, a `read_parquet` across some
+  of the partial files, to answer one partial of the same shape (T-685).
+
+  A partial merges into a partial the way it merges into the answer, minus
+  the final cast and the modifiers: a count or sum sums, a min or max takes
+  its extreme, `avg`'s two columns each sum, `any` takes any, an `argMax`
+  pair takes the arg of the args and the key over the rows that had a value,
+  a quantile's or a distinct count's value list flattens, a list flattens
+  and keeps its slice, a distinct list de-duplicates and keeps the one NULL
+  it may carry. Every column is cast back to the type the partial had, as
+  the `DESCRIBE` reported it after the integer-exactness cast, so the result
+  reads as a partial again at the next level or at the final. Groups group.
+  Sampled rows take `LIMIT n` of the union, which is what the final takes.
+  """
+  @spec repartial_sql(t(), String.t()) :: String.t()
+  def repartial_sql(%__MODULE__{rows: %{limit: limit}}, from),
+    do: "SELECT * FROM #{from} LIMIT #{limit}"
+
+  def repartial_sql(%__MODULE__{items: items, partial_columns: columns} = decomposition, from) do
+    ["SELECT #{repartial_select(items, columns)} FROM #{from}"]
+    |> append(decomposition.final_group)
+    |> Enum.join(" ")
+  end
+
+  defp repartial_select(items, columns) do
+    merges =
+      items
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {item, position} -> repartial_columns(item, position) end)
+      |> Map.new()
+
+    Enum.map_join(columns, ", ", fn {name, type} ->
+      case Map.fetch(merges, name) do
+        {:ok, expression} -> "CAST(#{expression} AS #{type}) AS #{quoted(name)}"
+        :error -> quoted(name)
+      end
+    end)
+  end
+
+  defp repartial_columns({:group, _index}, _position), do: []
+
+  defp repartial_columns({:aggregate, "avg", _item}, position) do
+    for suffix <- ["_s", "_c"] do
+      name = "#{@prefix}a#{position}#{suffix}"
+      {name, "sum(#{quoted(name)})"}
+    end
+  end
+
+  defp repartial_columns({:aggregate, name, _item}, position) do
+    alias = "#{@prefix}a#{position}"
+    [{alias, "#{merge_function(name)}(#{quoted(alias)})"}]
+  end
+
+  defp repartial_columns({:by_value, :any, _item}, position) do
+    alias = "#{@prefix}a#{position}"
+    [{alias, "any_value(#{quoted(alias)})"}]
+  end
+
+  defp repartial_columns({:by_value, {:arg, extreme}, _item}, position) do
+    value = quoted("#{@prefix}a#{position}_v")
+    key = quoted("#{@prefix}a#{position}_k")
+
+    [
+      {"#{@prefix}a#{position}_v", "arg_#{extreme}(#{value}, #{key})"},
+      {"#{@prefix}a#{position}_k", "#{extreme}(#{key}) FILTER (WHERE #{value} IS NOT NULL)"}
+    ]
+  end
+
+  defp repartial_columns({:by_value, {:quantile_sql, _final}, _item}, position),
+    do: [{"#{@prefix}a#{position}", flat(position)}]
+
+  defp repartial_columns({:by_value, :count_distinct, _item}, position),
+    do: [{"#{@prefix}a#{position}", "list_distinct(#{flat(position)})"}]
+
+  defp repartial_columns({:by_value, :list, item}, position),
+    do: [{"#{@prefix}a#{position}", position |> flat() |> sliced(item) |> unless_empty(position)}]
+
+  defp repartial_columns({:by_value, :flat_distinct_list, item}, position) do
+    distinct = "list_distinct(#{flat(position)})"
+    [{"#{@prefix}a#{position}", distinct |> sliced(item) |> unless_empty(position)}]
+  end
+
+  defp repartial_columns({:by_value, :distinct_list, item}, position) do
+    part = quoted("#{@prefix}a#{position}")
+
+    distinct =
+      "list_concat(list_distinct(#{flat(position)}), " <>
+        "CASE WHEN bool_or(len(#{part}) > list_count(#{part})) THEN [NULL] ELSE [] END)"
+
+    [{"#{@prefix}a#{position}", distinct |> sliced(item) |> unless_empty(position)}]
   end
 
   @doc """
@@ -910,9 +1009,16 @@ defmodule Smolquery.QueryService.Decomposer do
     with {:ok, columns} <- Connection.describe(connection, partial_sql, params, :infinity),
          :ok <- exact_columns(columns) do
       if Enum.any?(columns, &match?({_name, "HUGEINT"}, &1)),
-        do: {:ok, "SELECT #{exact_select(columns)} FROM (#{partial_sql})"},
-        else: {:ok, partial_sql}
+        do: {:ok, "SELECT #{exact_select(columns)} FROM (#{partial_sql})", exact_types(columns)},
+        else: {:ok, partial_sql, columns}
     end
+  end
+
+  defp exact_types(columns) do
+    Enum.map(columns, fn
+      {name, "HUGEINT"} -> {name, "DECIMAL(38,0)"}
+      column -> column
+    end)
   end
 
   defp exact_columns(columns) do

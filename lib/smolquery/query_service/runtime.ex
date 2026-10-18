@@ -264,7 +264,8 @@ defmodule Smolquery.QueryService.Runtime do
       retry_floor_ms: 5_000,
       max_inflight: 64,
       spill_inline_max_bytes: 4_194_304,
-      spill_prefix: "burst-partials"
+      spill_prefix: "burst-partials",
+      merge_fan_in: 16
     }
   ]
 
@@ -468,7 +469,8 @@ defmodule Smolquery.QueryService.Runtime do
       retry_floor_ms: Keyword.fetch!(policy, :retry_floor_ms),
       max_inflight: Keyword.fetch!(policy, :max_inflight),
       spill_inline_max_bytes: Keyword.fetch!(policy, :spill_inline_max_bytes),
-      spill_prefix: Keyword.fetch!(policy, :spill_prefix)
+      spill_prefix: Keyword.fetch!(policy, :spill_prefix),
+      merge_fan_in: Keyword.fetch!(policy, :merge_fan_in)
     }
   end
 

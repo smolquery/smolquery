@@ -75,16 +75,49 @@ defmodule Smolquery.QueryService.DecomposerTest do
         define_view("true")
       end
 
-    parquet = Enum.map_join(paths, ", ", &Smolquery.Identifier.sql_string/1)
-
-    merged =
-      Engine.query!(@engine, Decomposer.final_sql(decomposition, "read_parquet([#{parquet}])"))
+    merged = Engine.query!(@engine, Decomposer.final_sql(decomposition, read_parquet(paths)))
 
     assert merged.columns == expected.columns
     assert_rows(expected.rows, merged.rows)
 
+    repartialed = repartial_round_trip(decomposition, paths, tmp_dir)
+
+    assert repartialed.columns == expected.columns
+    assert_rows(expected.rows, repartialed.rows)
+
     decomposition
   end
+
+  defp repartial_round_trip(decomposition, [first, second] = paths, tmp_dir) do
+    both = repartial(decomposition, paths, tmp_dir)
+    twice = repartial(decomposition, [both], tmp_dir)
+    second_alone = repartial(decomposition, [second], tmp_dir)
+    expected = Engine.query!(@engine, Decomposer.final_sql(decomposition, read_parquet(paths)))
+
+    for from <- [[both], [first, second_alone]] do
+      assert_rows(
+        expected.rows,
+        Engine.query!(@engine, Decomposer.final_sql(decomposition, read_parquet(from))).rows
+      )
+    end
+
+    Engine.query!(@engine, Decomposer.final_sql(decomposition, read_parquet([twice])))
+  end
+
+  defp repartial(decomposition, paths, tmp_dir) do
+    path = Path.join(tmp_dir, "repartial-#{System.unique_integer([:positive])}.parquet")
+
+    Engine.query!(
+      @engine,
+      "COPY (#{Decomposer.repartial_sql(decomposition, read_parquet(paths))}) TO " <>
+        "#{Smolquery.Identifier.sql_string(path)} (FORMAT parquet)"
+    )
+
+    path
+  end
+
+  defp read_parquet(paths),
+    do: "read_parquet([#{Enum.map_join(paths, ", ", &Smolquery.Identifier.sql_string/1)}])"
 
   defp assert_rows(expected, merged) do
     assert length(expected) == length(merged)

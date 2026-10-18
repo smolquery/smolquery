@@ -80,7 +80,8 @@ defmodule Smolquery.Burst do
     retry_floor_ms: 5_000,
     max_inflight: 64,
     spill_inline_max_bytes: 4_194_304,
-    spill_prefix: "burst-partials"
+    spill_prefix: "burst-partials",
+    merge_fan_in: 16
   ]
 
   @doc "The pool runners are leased from."
@@ -129,8 +130,10 @@ defmodule Smolquery.Burst do
   runner shard is not retried on a peer), `max_inflight`, the most runner
   replies the coordinator holds outstanding at once, and the spill (D6):
   a runner partial over `spill_inline_max_bytes` is written to the sealed
-  store under `spill_prefix` and returned as a location, not as bytes. Configured keys
-  override the defaults; `Smolquery.QueryService.Runtime` reads it at boot.
+  store under `spill_prefix` and returned as a location, not as bytes, and
+  `merge_fan_in` is how many spilled partials one runner merges at a time
+  before the coordinator takes the rest (T-685). Configured keys override
+  the defaults; `Smolquery.QueryService.Runtime` reads it at boot.
   """
   @spec policy() :: keyword()
   def policy do

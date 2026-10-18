@@ -1084,7 +1084,8 @@ for {variable, key} <- [
       {"SMOLQUERY_BURST_MAX_PER_JOB", :max_per_job},
       {"SMOLQUERY_BURST_TARGET_BYTES", :target_bytes},
       {"SMOLQUERY_BURST_WAIT_MS", :wait_ms},
-      {"SMOLQUERY_BURST_MAX_INFLIGHT", :max_inflight}
+      {"SMOLQUERY_BURST_MAX_INFLIGHT", :max_inflight},
+      {"SMOLQUERY_BURST_MERGE_FAN_IN", :merge_fan_in}
     ],
     value = System.get_env(variable) do
   config :smolquery, Smolquery.Burst, [
