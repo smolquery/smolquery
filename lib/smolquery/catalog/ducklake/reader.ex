@@ -71,6 +71,15 @@ defmodule Smolquery.Catalog.DuckLake.Reader do
   migration, `Smolquery.Catalog.Migrations.DucklakeReadIndexes`, which the
   boot step builds `CONCURRENTLY`, one node at a time (T-609). They add to
   DuckLake's tables without changing its schema contract.
+
+  `segment_files/3` reads each live file's column ids with a subquery on
+  `smolquery_file_column_stats_table`, so its cost is the file count times
+  one index read. It once joined the stats to the live files and aggregated
+  them per table instead. Postgres estimates the live files at one row, so
+  it planned a nested loop that ran the whole aggregate again for every file.
+  The cost grew with the square of the file count: 158-459 ms at 153 files
+  and over the pool's 15 s at 1,730, where every scatter fell back. The
+  subquery reads the 153 files in 9-10 ms and the 1,730 in 79-340 ms (T-696).
   """
 
   require Logger

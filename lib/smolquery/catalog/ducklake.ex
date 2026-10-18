@@ -846,29 +846,20 @@ defmodule Smolquery.Catalog.DuckLake do
     end
   end
 
-  defp segment_files_sql(%__MODULE__{reader: nil} = config) do
+  defp segment_files_sql(%__MODULE__{reader: nil} = config),
+    do: segment_files_sql(config, "list", "df.path")
+
+  defp segment_files_sql(config),
+    do: segment_files_sql(config, "array_agg", ~s|df.path COLLATE "C"|)
+
+  defp segment_files_sql(config, aggregate, order) do
     "SELECT df.path, df.path_is_relative, " <>
       "CAST(COALESCE(df.record_count, 0) AS BIGINT), " <>
       "CAST(COALESCE(df.file_size_bytes, 0) AS BIGINT), df.begin_snapshot, " <>
-      "(SELECT list(fcs.column_id ORDER BY fcs.column_id) " <>
+      "(SELECT #{aggregate}(fcs.column_id ORDER BY fcs.column_id) " <>
       "FROM #{meta(config, "ducklake_file_column_stats")} fcs " <>
-      "WHERE fcs.data_file_id = df.data_file_id AND fcs.table_id = df.table_id) " <>
-      "FROM #{live_files_joins(config)} WHERE #{@live_files} ORDER BY df.path"
-  end
-
-  defp segment_files_sql(config) do
-    "WITH live AS (SELECT df.data_file_id, df.table_id, df.path, df.path_is_relative, " <>
-      "df.record_count, df.file_size_bytes, df.begin_snapshot " <>
-      "FROM #{live_files_joins(config)} WHERE #{@live_files}) " <>
-      "SELECT live.path, live.path_is_relative, " <>
-      "CAST(COALESCE(live.record_count, 0) AS BIGINT), " <>
-      "CAST(COALESCE(live.file_size_bytes, 0) AS BIGINT), live.begin_snapshot, stats.column_ids " <>
-      "FROM live LEFT JOIN (SELECT fcs.data_file_id, " <>
-      "array_agg(fcs.column_id ORDER BY fcs.column_id) AS column_ids " <>
-      "FROM ducklake_file_column_stats fcs JOIN live " <>
-      "ON live.table_id = fcs.table_id AND live.data_file_id = fcs.data_file_id " <>
-      "GROUP BY fcs.data_file_id) stats ON stats.data_file_id = live.data_file_id " <>
-      "ORDER BY live.path COLLATE \"C\""
+      "WHERE fcs.table_id = df.table_id AND fcs.data_file_id = df.data_file_id) " <>
+      "FROM #{live_files_joins(config)} WHERE #{@live_files} ORDER BY #{order}"
   end
 
   defp live_files_joins(config) do

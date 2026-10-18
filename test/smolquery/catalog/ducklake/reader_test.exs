@@ -181,6 +181,23 @@ defmodule Smolquery.Catalog.DuckLake.ReaderTest do
       assert {:ok, [_ | _]} = Catalog.segment_files(catalog, @variant, current)
     end
 
+    test "segment_files reads every file's column ids on a table of many files (T-696)",
+         context do
+      %{catalog: catalog, duckdb: duckdb, store: store} = context
+      :ok = Catalog.create_dataset(catalog, "analytics")
+
+      :ok =
+        Catalog.create_table(catalog, @events, Schema.new!([{"id", :int64}, {"name", :string}]))
+
+      segments = for n <- 1..40, do: seal!(store, n)
+      {:ok, snapshot} = Catalog.register_segments(catalog, @events, Enum.shuffle(segments))
+
+      assert {:ok, files} = Catalog.segment_files(catalog, @events, snapshot)
+      assert Enum.all?(files, &(&1.column_ids == [1, 2]))
+      assert Enum.map(files, & &1.path) == segments |> Enum.map(& &1.path) |> Enum.sort()
+      assert Catalog.segment_files(duckdb, @events, snapshot) == {:ok, files}
+    end
+
     test "a reader that cannot answer returns an error, never an exit or a DuckDB answer",
          context do
       %{duckdb: duckdb, store: store} = context
