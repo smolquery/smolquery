@@ -74,8 +74,11 @@ defmodule Smolquery.QueryService.Scatter do
      each, since a pod merges at four times a Lambda's rate for free),
      which runs the decomposition's re-partial
      (`Decomposer.repartial_sql/2`) over its group and answers one partial
-     of the same shape, spilled or inline as any shard's; a peer's comes
-     back inline. A level runs only while there is enough spilled to be
+     of the same shape, spilled or inline as any shard's; a peer merge
+     shard spills through its own node's store, where a peer scan shard
+     never does. The peers are rotated by job, so the merges of every
+     coordinator in a cluster do not land on the same pod. A level runs
+     only while there is enough spilled to be
      worth a lease and the level before it halved the bytes
      (`Policy.merge_shrank?/2`); what is left merges with the inline
      partials in the final. The inputs every level consumed are deleted
@@ -595,14 +598,21 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp merge_deal(partials, %{runtime: %Runtime{burst: burst}, peers: peers}) do
+  defp merge_deal(partials, %{runtime: %Runtime{burst: burst}} = context) do
     {spilled, inline} = Enum.split_with(partials, &spilled?/1)
     {groups, left} = Policy.merge_groups(spilled, burst)
 
-    case Policy.merge_shards(groups, peers, burst) do
+    case Policy.merge_shards(groups, rotated_peers(context), burst) do
       [] -> {[], partials}
       shards -> {shards, inline ++ left}
     end
+  end
+
+  defp rotated_peers(%{peers: []}), do: []
+
+  defp rotated_peers(%{peers: peers, job_id: job_id}) do
+    {head, tail} = Enum.split(peers, rem(:erlang.phash2(job_id), length(peers)))
+    tail ++ head
   end
 
   defp spilled?(%{spilled: key}), do: is_binary(key)
@@ -814,13 +824,15 @@ defmodule Smolquery.QueryService.Scatter do
   defp request(%{kind: :peer, node: node} = target, files, context) do
     %{runtime: runtime, base: base, node_files: node_files} = context
 
-    Map.merge(base, %{
+    base
+    |> Map.merge(%{
       files: files,
       file_cache: runtime.file_cache.decision,
       file_cache_mode: runtime.file_cache.mode,
       node_files: Map.fetch!(node_files, node) ++ retried_sealed(target, files),
       allowed_paths: files |> Enum.filter(&hot?/1) |> Enum.map(& &1["url"])
     })
+    |> peer_spill(target, context)
   end
 
   defp request(%{kind: :runner, index: index}, files, %{runner_base: runner_base} = context) do
@@ -828,6 +840,11 @@ defmodule Smolquery.QueryService.Scatter do
     |> Map.merge(%{files: files, allowed_paths: []})
     |> with_spill(context, index)
   end
+
+  defp peer_spill(request, %{merge: _level, index: index}, context),
+    do: with_spill(request, context, index)
+
+  defp peer_spill(request, _scan_target, _context), do: request
 
   defp merge_sql(request, %{merge: %{locations: locations}}, %{decomposition: decomposition}) do
     Map.merge(request, %{

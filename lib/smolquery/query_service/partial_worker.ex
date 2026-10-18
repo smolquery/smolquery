@@ -110,7 +110,10 @@ defmodule Smolquery.QueryService.PartialWorker do
   runner, with the store's own credentials and a staging directory under
   the runner's tmp, and the reply carries its location instead. The
   coordinator's merge reads that location like any sealed file and deletes
-  it after. A peer shard never spills: its request has no `spill`.
+  it after. A peer scan shard never spills: its request has no `spill`. A
+  peer merge shard does (T-701), through this node's own store, since a
+  partial merged from hundreds of MB of inputs must not cross distribution
+  as one message.
   """
 
   alias Smolquery.AwsCredentials
@@ -225,7 +228,8 @@ defmodule Smolquery.QueryService.PartialWorker do
     plan = %{
       settings: [],
       functions: functions(spec.clickhouse_functions, request.partial_sql),
-      lockdown: &lockdown(spec.lockdown, spec.allowed_directories, spec.store, &1, &2)
+      lockdown: &lockdown(spec.lockdown, spec.allowed_directories, spec.store, &1, &2),
+      store: spec.store
     }
 
     case Telemetry.timed(fn -> JobEngine.start_standalone(standalone_options(spec)) end) do
@@ -325,7 +329,8 @@ defmodule Smolquery.QueryService.PartialWorker do
     plan = %{
       settings: set_statements(limits(runtime)) ++ FileCache.statements(decision),
       functions: functions(runtime.clickhouse_functions, request.partial_sql),
-      lockdown: &lockdown(runtime.lockdown, runtime.allowed_directories, runtime.store, &1, &2)
+      lockdown: &lockdown(runtime.lockdown, runtime.allowed_directories, runtime.store, &1, &2),
+      store: runtime.store
     }
 
     case Telemetry.timed(fn -> JobEngine.acquire(runtime) end) do
@@ -364,7 +369,7 @@ defmodule Smolquery.QueryService.PartialWorker do
                  Map.get(request, :timeout_ms, :infinity)
                )
              end),
-           {:ok, partial} <- deliver(path, request) do
+           {:ok, partial} <- deliver(path, request, plan.store) do
         if decision do
           :telemetry.execute([:smolquery, :query, :file_cache, :shard], %{}, %{
             decision: decision
@@ -516,10 +521,7 @@ defmodule Smolquery.QueryService.PartialWorker do
   defp copied_rows(%{rows: [[count]]}) when is_integer(count), do: count
   defp copied_rows(_result), do: 0
 
-  defp deliver(path, %{
-         spill: %{key: key, inline_max_bytes: max},
-         engine: %{store: %Store{} = store}
-       }) do
+  defp deliver(path, %{spill: %{key: key, inline_max_bytes: max}}, %Store{} = store) do
     %File.Stat{size: size} = File.stat!(path)
 
     if size > max do
@@ -535,7 +537,7 @@ defmodule Smolquery.QueryService.PartialWorker do
     end
   end
 
-  defp deliver(path, _inline), do: {:ok, %{parquet: File.read!(path), spilled: nil}}
+  defp deliver(path, _inline, _store), do: {:ok, %{parquet: File.read!(path), spilled: nil}}
 
   defp stage(path, staged) do
     case File.rename(path, staged) do

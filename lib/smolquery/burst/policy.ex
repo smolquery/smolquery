@@ -45,11 +45,11 @@ defmodule Smolquery.Burst.Policy do
 
   The shards go to the peers first (`merge_shards/3`, T-701). A query pod
   merges at 200 to 400 MB/s against a Lambda's 65, with no lease and no
-  bill, and its output comes back inline, so a peer takes
-  `merge_peer_weight` groups in one shard (4, about what a pod does in the
-  time a runner takes one) and the groups left over go to runners one
-  each; `0` keeps every merge shard on runners. A level that would be one
-  shard is not run: the coordinator merges those partials itself.
+  bill, so a peer takes `merge_peer_weight` groups in one shard (4, about
+  what a pod does in the time a runner takes one), which is up to that
+  many times `merge_fan_in` inputs, and the groups left over go to runners
+  one each; `0` keeps every merge shard on runners. A level that would be
+  one shard is not run: the coordinator merges those partials itself.
   """
 
   @type request :: false | :auto | non_neg_integer()

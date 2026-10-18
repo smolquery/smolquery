@@ -196,8 +196,11 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
   end
 
-  defp nodes(job) do
-    for %{name: :shard, meta: %{kind: :peer, node: node}} <- job.trace, uniq: true, do: node
+  defp scan_peers(job) do
+    for %{name: :shard, meta: %{kind: :peer, node: node} = meta} <- job.trace,
+        not Map.has_key?(meta, :merge_level),
+        uniq: true,
+        do: node
   end
 
   defp seed(catalog, buffer, tmp_dir) do
@@ -759,7 +762,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
          merge_fan_in: 2,
          merge_min_bytes: 0
        ]
-  test "merge shards run on the peers first, and their partials come back inline (T-701)",
+  test "merge shards run on the peers first, and spill through the peer's own store (T-701)",
        %{control: control, distributed: distributed, tmp_dir: tmp_dir, catalog: catalog} do
     seal_seventh(catalog, tmp_dir)
 
@@ -774,16 +777,17 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert %{peers: 3, burst: 4} = job.scatter
 
     assert [tree] = Enum.filter(job.trace, &(&1.name == :tree_merge))
-    assert %{outcome: :ok, levels: 1, shards: 2, peer_shards: 2, left_bytes: 0} = tree.meta
+    assert %{outcome: :ok, levels: 1, shards: 2, peer_shards: 2, left_bytes: left} = tree.meta
+    assert left > 0
 
     merges = Enum.filter(job.trace, &(&1.name == :shard and Map.has_key?(&1.meta, :merge_level)))
     assert [_, _] = merges
 
     for merge <- merges do
-      assert %{kind: :peer, merge_level: 1, inputs: 2, files: 0, spilled: false, rows: rows} =
+      assert %{kind: :peer, merge_level: 1, inputs: 2, files: 0, spilled: true, rows: rows} =
                merge.meta
 
-      assert rows > 0 and merge.meta.node in nodes(job)
+      assert rows > 0 and merge.meta.node in scan_peers(job)
     end
 
     assert {:ok, []} = Store.list(seed_store(tmp_dir), "burst-partials")

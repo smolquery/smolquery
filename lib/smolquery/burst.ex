@@ -135,8 +135,9 @@ defmodule Smolquery.Burst do
   a runner partial over `spill_inline_max_bytes` is written to the sealed
   store under `spill_prefix` and returned as a location, not as bytes, and
   the tree merge deals spilled partials into merge shards of up to
-  `merge_target_bytes` and `merge_fan_in` inputs, and does not run under
-  `merge_min_bytes` of them (T-685, T-700). Configured keys override
+  `merge_target_bytes` and `merge_fan_in` inputs, does not run under
+  `merge_min_bytes` of them, and gives the peers `merge_peer_weight` such
+  groups each before the runners get the rest (T-685, T-700, T-701). Configured keys override
   the defaults; `Smolquery.QueryService.Runtime` reads it at boot.
   """
   @spec policy() :: keyword()
