@@ -69,10 +69,13 @@ defmodule Smolquery.QueryService.Scatter do
      bench (T-683): 2 to 3 GB of partials through one engine. So the
      coordinator deals the spilled partials into merge shards the way
      `Smolquery.Burst.Policy.merge_groups/2` sizes them, by bytes under a
-     fan-in cap (T-700), and sends each to a runner, which runs the
-     decomposition's re-partial (`Decomposer.repartial_sql/2`) over its
-     group and answers one partial of the same shape, spilled or inline as
-     any shard's. A level runs only while there is enough spilled to be
+     fan-in cap (T-700), and sends each to a peer or a runner
+     (`Policy.merge_shards/3`, T-701: the peers first, a weighted share
+     each, since a pod merges at four times a Lambda's rate for free),
+     which runs the decomposition's re-partial
+     (`Decomposer.repartial_sql/2`) over its group and answers one partial
+     of the same shape, spilled or inline as any shard's; a peer's comes
+     back inline. A level runs only while there is enough spilled to be
      worth a lease and the level before it halved the bytes
      (`Policy.merge_shrank?/2`); what is left merges with the inline
      partials in the final. The inputs every level consumed are deleted
@@ -137,6 +140,12 @@ defmodule Smolquery.QueryService.Scatter do
               index: non_neg_integer(),
               kind: :runner,
               pool: atom(),
+              merge: %{level: pos_integer(), locations: [String.t()]}
+            }
+          | %{
+              index: non_neg_integer(),
+              kind: :peer,
+              node: node(),
               merge: %{level: pos_integer(), locations: [String.t()]}
             }
 
@@ -569,12 +578,13 @@ defmodule Smolquery.QueryService.Scatter do
       {[], _kept} ->
         {partials, []}
 
-      {groups, kept} ->
+      {shards, kept} ->
         {inputs, stats} =
           Trace.span(:tree_merge, &tree_meta/1, fn ->
-            levels(context, dir, {groups, kept}, %{
+            levels(context, dir, {shards, kept}, %{
               level: 1,
               shards: 0,
+              peer_shards: 0,
               consumed: [],
               spilled_bytes: spilled_bytes(partials),
               next_index: 1 + Enum.max(for {%{index: index}, _files} <- context.shards, do: index)
@@ -585,10 +595,14 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp merge_deal(partials, %{runtime: %Runtime{burst: burst}}) do
+  defp merge_deal(partials, %{runtime: %Runtime{burst: burst}, peers: peers}) do
     {spilled, inline} = Enum.split_with(partials, &spilled?/1)
     {groups, left} = Policy.merge_groups(spilled, burst)
-    {groups, inline ++ left}
+
+    case Policy.merge_shards(groups, peers, burst) do
+      [] -> {[], partials}
+      shards -> {shards, inline ++ left}
+    end
   end
 
   defp spilled?(%{spilled: key}), do: is_binary(key)
@@ -596,22 +610,28 @@ defmodule Smolquery.QueryService.Scatter do
   defp spilled_bytes(partials),
     do: partials |> Enum.filter(&spilled?/1) |> Enum.sum_by(& &1.bytes)
 
-  defp levels(context, dir, {groups, kept}, stats) do
-    grouped = List.flatten(groups)
-    descend(context, dir, {grouped, kept}, merge_targets(groups, context, stats), stats)
+  defp levels(context, dir, {shards, kept}, stats) do
+    grouped = Enum.flat_map(shards, &elem(&1, 1))
+    descend(context, dir, {grouped, kept}, merge_targets(shards, context, stats), stats)
   end
 
-  defp merge_targets(groups, %{runtime: %Runtime{burst: %{pool: pool}}}, stats) do
-    Enum.with_index(groups, fn group, offset ->
+  defp merge_targets(shards, %{runtime: %Runtime{burst: %{pool: pool}}}, stats) do
+    Enum.with_index(shards, fn {host, group}, offset ->
       merge = %{level: stats.level, locations: Enum.map(group, & &1.path)}
-      {%{kind: :runner, pool: pool, index: stats.next_index + offset, merge: merge}, []}
+      {merge_target(host, pool, stats.next_index + offset, merge), []}
     end)
   end
+
+  defp merge_target(:runner, pool, index, merge),
+    do: %{kind: :runner, pool: pool, index: index, merge: merge}
+
+  defp merge_target({:peer, peer}, _pool, index, merge),
+    do: Map.merge(peer, %{index: index, merge: merge})
 
   defp descend(%{runtime: runtime} = context, dir, {grouped, kept}, targets, stats) do
     case level(context, dir, targets) do
       {:ok, merged} ->
-        stats = advanced(stats, length(targets), Enum.map(grouped, & &1.spilled))
+        stats = advanced(stats, targets, Enum.map(grouped, & &1.spilled))
         bytes = {Enum.sum_by(grouped, & &1.bytes), Enum.sum_by(merged, & &1.bytes)}
         next_level(context, dir, kept ++ merged, bytes, stats)
 
@@ -646,13 +666,14 @@ defmodule Smolquery.QueryService.Scatter do
     })
   end
 
-  defp advanced(stats, shards, consumed) do
+  defp advanced(stats, targets, consumed) do
     %{
       stats
       | level: stats.level + 1,
-        shards: stats.shards + shards,
+        shards: stats.shards + length(targets),
+        peer_shards: stats.peer_shards + Enum.count(targets, &(elem(&1, 0).kind == :peer)),
         consumed: stats.consumed ++ consumed,
-        next_index: stats.next_index + shards
+        next_index: stats.next_index + length(targets)
     }
   end
 
@@ -671,6 +692,7 @@ defmodule Smolquery.QueryService.Scatter do
       outcome: outcome,
       levels: levels,
       shards: shards,
+      peer_shards: stats.peer_shards,
       consumed: length(stats.consumed),
       spilled_bytes: stats.spilled_bytes,
       left_bytes: stats.left_bytes

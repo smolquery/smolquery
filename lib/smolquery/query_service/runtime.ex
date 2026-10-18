@@ -267,7 +267,8 @@ defmodule Smolquery.QueryService.Runtime do
       spill_prefix: "burst-partials",
       merge_fan_in: 16,
       merge_target_bytes: 134_217_728,
-      merge_min_bytes: 536_870_912
+      merge_min_bytes: 536_870_912,
+      merge_peer_weight: 4
     }
   ]
 
@@ -331,7 +332,8 @@ defmodule Smolquery.QueryService.Runtime do
             spill_prefix: String.t(),
             merge_fan_in: pos_integer(),
             merge_target_bytes: pos_integer(),
-            merge_min_bytes: non_neg_integer()
+            merge_min_bytes: non_neg_integer(),
+            merge_peer_weight: non_neg_integer()
           }
         }
 
@@ -477,7 +479,8 @@ defmodule Smolquery.QueryService.Runtime do
       spill_prefix: Keyword.fetch!(policy, :spill_prefix),
       merge_fan_in: Keyword.fetch!(policy, :merge_fan_in),
       merge_target_bytes: Keyword.fetch!(policy, :merge_target_bytes),
-      merge_min_bytes: Keyword.fetch!(policy, :merge_min_bytes)
+      merge_min_bytes: Keyword.fetch!(policy, :merge_min_bytes),
+      merge_peer_weight: Keyword.fetch!(policy, :merge_peer_weight)
     }
   end
 

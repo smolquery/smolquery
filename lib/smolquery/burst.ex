@@ -83,7 +83,8 @@ defmodule Smolquery.Burst do
     spill_prefix: "burst-partials",
     merge_fan_in: 16,
     merge_target_bytes: 134_217_728,
-    merge_min_bytes: 536_870_912
+    merge_min_bytes: 536_870_912,
+    merge_peer_weight: 4
   ]
 
   @doc "The pool runners are leased from."

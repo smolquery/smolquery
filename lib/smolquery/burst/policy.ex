@@ -42,6 +42,14 @@ defmodule Smolquery.Burst.Policy do
   spilled partials, and a level runs only after the level before it
   halved the spilled bytes (`merge_shrank?/2`): a merge that finds few
   shared keys has nothing for the next level to save.
+
+  The shards go to the peers first (`merge_shards/3`, T-701). A query pod
+  merges at 200 to 400 MB/s against a Lambda's 65, with no lease and no
+  bill, and its output comes back inline, so a peer takes
+  `merge_peer_weight` groups in one shard (4, about what a pod does in the
+  time a runner takes one) and the groups left over go to runners one
+  each; `0` keeps every merge shard on runners. A level that would be one
+  shard is not run: the coordinator merges those partials itself.
   """
 
   @type request :: false | :auto | non_neg_integer()
@@ -61,8 +69,11 @@ defmodule Smolquery.Burst.Policy do
           required(:merge_fan_in) => pos_integer(),
           required(:merge_target_bytes) => pos_integer(),
           required(:merge_min_bytes) => non_neg_integer(),
+          required(:merge_peer_weight) => non_neg_integer(),
           optional(atom()) => term()
         }
+
+  @type merge_host(peer) :: :runner | {:peer, peer}
 
   @type partial :: %{required(:bytes) => non_neg_integer(), optional(atom()) => term()}
 
@@ -121,6 +132,32 @@ defmodule Smolquery.Burst.Policy do
 
   def merge_groups(spilled, %{merge_min_bytes: floor} = config) do
     if Enum.sum_by(spilled, & &1.bytes) < floor, do: {[], spilled}, else: deal(spilled, config)
+  end
+
+  @doc """
+  The merge shards one level runs over `groups` (from `merge_groups/2`),
+  each on a host: the peers take the first `merge_peer_weight` groups
+  each, dealt as evenly as the peers allow, as one shard per peer; every
+  group after that is a shard on a runner. None when fewer than two shards
+  would run, since one shard moves the whole merge to one host and saves
+  the coordinator nothing. A weight of `0` sends every group to a runner.
+  """
+  @spec merge_shards([[partial()]], [peer], merge_config()) :: [{merge_host(peer), [partial()]}]
+        when peer: term()
+  def merge_shards(groups, peers, %{merge_peer_weight: weight}) do
+    on_peers = min(length(groups), weight * length(peers))
+    {for_peers, for_runners} = Enum.split(groups, on_peers)
+
+    shards =
+      for_peers
+      |> Enum.chunk_every(max(ceil_div(on_peers, max(length(peers), 1)), 1))
+      |> Enum.zip_with(peers, fn chunk, peer -> {{:peer, peer}, List.flatten(chunk)} end)
+      |> Enum.concat(Enum.map(for_runners, &{:runner, &1}))
+
+    case shards do
+      [_, _ | _] -> shards
+      _one_or_none -> []
+    end
   end
 
   @doc """

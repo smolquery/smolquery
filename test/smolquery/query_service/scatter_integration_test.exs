@@ -190,6 +190,16 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     Schema.new!([{"id", :int64, nullable: false}, {"name", :string}])
   end
 
+  defp seal_seventh(catalog, tmp_dir) do
+    rows = for i <- 16..17, do: %{"id" => i, "name" => "g-#{rem(i, 3)}"}
+    {:ok, segment} = SegmentFixture.write(rows, schema(), store: seed_store(tmp_dir))
+    {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+  end
+
+  defp nodes(job) do
+    for %{name: :shard, meta: %{kind: :peer, node: node}} <- job.trace, uniq: true, do: node
+  end
+
   defp seed(catalog, buffer, tmp_dir) do
     store = seed_store(tmp_dir)
 
@@ -708,13 +718,12 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
          spill: true,
          spill_inline_max_bytes: 0,
          merge_fan_in: 2,
-         merge_min_bytes: 0
+         merge_min_bytes: 0,
+         merge_peer_weight: 0
        ]
   test "spilled partials merge in a tree on runners before the final, and leave nothing behind (T-685, T-700)",
        %{control: control, distributed: distributed, tmp_dir: tmp_dir, catalog: catalog} do
-    seventh = for i <- 16..17, do: %{"id" => i, "name" => "g-#{rem(i, 3)}"}
-    {:ok, segment} = SegmentFixture.write(seventh, schema(), store: seed_store(tmp_dir))
-    {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+    seal_seventh(catalog, tmp_dir)
 
     sql =
       "SELECT name, count(*) AS c, sum(id) AS s FROM analytics.events GROUP BY name ORDER BY name"
@@ -738,6 +747,43 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
                merge.meta
 
       assert merge.meta.inputs == 2 and rows > 0
+    end
+
+    assert {:ok, []} = Store.list(seed_store(tmp_dir), "burst-partials")
+  end
+
+  @tag burst: [
+         max: 4,
+         spill: true,
+         spill_inline_max_bytes: 0,
+         merge_fan_in: 2,
+         merge_min_bytes: 0
+       ]
+  test "merge shards run on the peers first, and their partials come back inline (T-701)",
+       %{control: control, distributed: distributed, tmp_dir: tmp_dir, catalog: catalog} do
+    seal_seventh(catalog, tmp_dir)
+
+    sql =
+      "SELECT name, count(*) AS c, sum(id) AS s FROM analytics.events GROUP BY name ORDER BY name"
+
+    both(control, distributed, sql, burst: 4)
+
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, sql, burst: 4, trace: true)
+
+    assert %{peers: 3, burst: 4} = job.scatter
+
+    assert [tree] = Enum.filter(job.trace, &(&1.name == :tree_merge))
+    assert %{outcome: :ok, levels: 1, shards: 2, peer_shards: 2, left_bytes: 0} = tree.meta
+
+    merges = Enum.filter(job.trace, &(&1.name == :shard and Map.has_key?(&1.meta, :merge_level)))
+    assert [_, _] = merges
+
+    for merge <- merges do
+      assert %{kind: :peer, merge_level: 1, inputs: 2, files: 0, spilled: false, rows: rows} =
+               merge.meta
+
+      assert rows > 0 and merge.meta.node in nodes(job)
     end
 
     assert {:ok, []} = Store.list(seed_store(tmp_dir), "burst-partials")

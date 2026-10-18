@@ -59,7 +59,12 @@ defmodule Smolquery.Burst.PolicyTest do
   end
 
   @mib 1_048_576
-  @merge %{merge_fan_in: 16, merge_target_bytes: 128 * @mib, merge_min_bytes: 0}
+  @merge %{
+    merge_fan_in: 16,
+    merge_target_bytes: 128 * @mib,
+    merge_min_bytes: 0,
+    merge_peer_weight: 4
+  }
 
   defp partials(sizes), do: Enum.with_index(sizes, fn bytes, i -> %{index: i, bytes: bytes} end)
 
@@ -113,6 +118,44 @@ defmodule Smolquery.Burst.PolicyTest do
       spilled = partials(List.duplicate(50 * @mib, 100))
 
       assert {[], ^spilled} = Policy.merge_groups(spilled, %{@merge | merge_fan_in: 1})
+    end
+  end
+
+  describe "merge_shards/3 (T-701)" do
+    @peers [:a, :b, :c]
+
+    defp groups(n), do: for(i <- 1..n, do: [%{index: i, bytes: @mib}, %{index: -i, bytes: @mib}])
+
+    test "the peers take merge_peer_weight groups each, the rest go to runners one each" do
+      shards = Policy.merge_shards(groups(15), @peers, @merge)
+
+      assert [{{:peer, :a}, a}, {{:peer, :b}, b}, {{:peer, :c}, c} | runners] = shards
+      assert Enum.map([a, b, c], &length/1) == [8, 8, 8]
+      assert [{:runner, [_, _]}, {:runner, [_, _]}, {:runner, [_, _]}] = runners
+    end
+
+    test "fewer groups than the peers' share are dealt evenly over the peers" do
+      assert [{{:peer, :a}, a}, {{:peer, :b}, b}, {{:peer, :c}, c}] =
+               Policy.merge_shards(groups(5), @peers, @merge)
+
+      assert Enum.map([a, b, c], &length/1) == [4, 4, 2]
+    end
+
+    test "a weight of 0 sends every group to a runner" do
+      shards = Policy.merge_shards(groups(3), @peers, %{@merge | merge_peer_weight: 0})
+      assert [{:runner, [_, _]}, {:runner, [_, _]}, {:runner, [_, _]}] = shards
+    end
+
+    test "a level that would be one shard is not run" do
+      assert [] == Policy.merge_shards(groups(4), [:a], @merge)
+
+      assert [{{:peer, :a}, _}, {:runner, _}] =
+               Policy.merge_shards(groups(2), [:a], %{@merge | merge_peer_weight: 1})
+
+      assert [{{:peer, :a}, _}, {{:peer, :b}, _}] =
+               Policy.merge_shards(groups(2), @peers, %{@merge | merge_peer_weight: 2})
+
+      assert [] == Policy.merge_shards([], @peers, @merge)
     end
   end
 

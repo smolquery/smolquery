@@ -227,7 +227,8 @@ One note per release, newest first.
 - **Why.** The 0.25.4 rerun of the 92 GB bench (T-683) showed a merge shard on a 10 GB Lambda re-aggregating at about 65 MB/s, a fifth of the coordinator's rate. Sixteen 85 MB partials made a 15 to 21 s shard at 25 runners and the three spilling shapes lost 2 to 18 s per job; only 100 runners broke even.
 - **`SMOLQUERY_BURST_MERGE_TARGET_BYTES` (`134217728`, 128 MiB)** sizes a merge shard the way `SMOLQUERY_BURST_TARGET_BYTES` sizes a scan shard, about 2 s of work; `SMOLQUERY_BURST_MERGE_FAN_IN` (`16`) is now only a cap on a shard's inputs.
 - **`SMOLQUERY_BURST_MERGE_MIN_BYTES` (`536870912`, 512 MiB)** keeps the tree off under that much spilled, and a second level runs only when the first at least halved the bytes.
-- **The `tree_merge` span** carries `spilled_bytes` and `left_bytes`, so a trace shows what a level saved the final.
+- **Merge shards run on the peers first (T-701).** `SMOLQUERY_BURST_MERGE_PEER_WEIGHT` (`4`) is how many merge groups a query pod takes as one shard before runners get the rest; a pod merges at four times a Lambda's rate for free. `0` restores runner-only merges.
+- **The `tree_merge` span** carries `spilled_bytes`, `left_bytes` and `peer_shards`, so a trace shows what a level saved the final and where it ran.
 
 ### 0.25.4: shard engines locked down, a smaller `auto` target, the tree merge (T-690, T-683, T-685, T-698)
 
