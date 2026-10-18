@@ -51,13 +51,17 @@ defmodule Smolquery.Burst do
   coordinator's worker memory limit and thread count. A runner's host is
   not the coordinator's: a 10 GB function under a 20 GB worker limit does
   not spill before the host kills it (T-695). So a runner sizes its engine
-  from its own host (`runner_limits/0`) and ignores the spec's limits:
-  memory from `runner_memory_limit`, or three quarters of
-  `AWS_LAMBDA_FUNCTION_MEMORY_SIZE` when Lambda set it, leaving the rest to
-  the BEAM and the partial; threads from `runner_threads`, or the VM's
-  online schedulers. The two keys come from the runner's own environment,
-  `SMOLQUERY_BURST_RUNNER_MEMORY_LIMIT` and `SMOLQUERY_BURST_RUNNER_THREADS`,
-  which on Lambda means the function's environment variables.
+  from its own host (`runner_limits/1`): memory from `runner_memory_limit`,
+  else three quarters of what the host gives it
+  (`Smolquery.Burst.HostMemory`: the Lambda function's size, the cgroup
+  limit, or the machine's total), leaving the rest to the BEAM, DuckDB's
+  untracked buffers and the partial; threads from `runner_threads`, else
+  the VM's online schedulers. The coordinator's memory limit survives only
+  on a host that reports nothing. The two keys come from the runner's own
+  environment, `SMOLQUERY_BURST_RUNNER_MEMORY_LIMIT` and
+  `SMOLQUERY_BURST_RUNNER_THREADS`, which on Lambda means the function's
+  environment variables. A local runner is not a runner in this sense: it
+  shares the coordinator's host and keeps the coordinator's limits.
   """
 
   @pool __MODULE__.Pool
@@ -162,33 +166,32 @@ defmodule Smolquery.Burst do
   end
 
   @doc """
-  The engine limits a runner applies in place of the coordinator's, as DuckDB
-  settings: `memory_limit` from the configured `runner_memory_limit`, else
-  three quarters of `AWS_LAMBDA_FUNCTION_MEMORY_SIZE` (megabytes, set by
-  Lambda), else none; `threads` from `runner_threads`, else
-  `System.schedulers_online/0`. Empty on a node that is not a runner, so a
-  local runner keeps the coordinator's limits: it shares the host they were
-  sized for.
+  The engine limits a runner applies, as DuckDB settings, in place of
+  `coordinator_limits` (the spec's `memory_limit` and `threads`): memory
+  from the configured `runner_memory_limit`, else three quarters of the
+  host's memory (`Smolquery.Burst.HostMemory.bytes/1`), else the
+  coordinator's; threads from `runner_threads`, else
+  `System.schedulers_online/0`. `coordinator_limits` unchanged on a node
+  that is not a runner.
   """
-  @spec runner_limits() :: [memory_limit: String.t(), threads: pos_integer()]
-  def runner_limits do
-    if runner?(), do: host_limits(config()), else: []
+  @spec runner_limits(keyword()) :: keyword()
+  def runner_limits(coordinator_limits) do
+    if runner?(), do: host_limits(config(), coordinator_limits), else: coordinator_limits
   end
 
-  defp host_limits(config) do
-    memory_limit = Keyword.get_lazy(config, :runner_memory_limit, &lambda_memory_limit/0)
-    threads = Keyword.get_lazy(config, :runner_threads, &System.schedulers_online/0)
-
-    case memory_limit do
-      nil -> [threads: threads]
-      limit -> [memory_limit: limit, threads: threads]
-    end
+  defp host_limits(config, coordinator_limits) do
+    [
+      memory_limit:
+        Keyword.get(config, :runner_memory_limit) || host_memory_limit() ||
+          Keyword.get(coordinator_limits, :memory_limit),
+      threads: Keyword.get(config, :runner_threads) || System.schedulers_online()
+    ]
   end
 
-  defp lambda_memory_limit do
-    case Integer.parse(System.get_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "")) do
-      {megabytes, ""} when megabytes > 0 -> "#{div(megabytes * 3, 4)}MB"
-      _other -> nil
+  defp host_memory_limit do
+    case __MODULE__.HostMemory.bytes() do
+      {:ok, bytes} -> "#{div(bytes * 3, 4 * 1024 * 1024)}MB"
+      :error -> nil
     end
   end
 

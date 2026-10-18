@@ -117,10 +117,10 @@ Lambda pulls only from ECR in its own account, so copy the tag across
 once per release and point the function at it:
 
 ```sh
-crane copy ghcr.io/smolquery/smolquery-lambda:v0.25.0 \
-  <account>.dkr.ecr.<region>.amazonaws.com/smolquery-burst-runner:v0.25.0
+crane copy ghcr.io/smolquery/smolquery-lambda:vX.Y.Z \
+  <account>.dkr.ecr.<region>.amazonaws.com/smolquery-burst-runner:vX.Y.Z
 aws lambda update-function-code --function-name smolquery-burst-runner \
-  --image-uri <account>.dkr.ecr.<region>.amazonaws.com/smolquery-burst-runner:v0.25.0
+  --image-uri <account>.dkr.ecr.<region>.amazonaws.com/smolquery-burst-runner:vX.Y.Z
 ```
 
 **The function.** Container image, `arm64`, 10 GB of memory (which buys
@@ -138,7 +138,8 @@ that gave up on it. Reserved concurrency is
 the deployment-wide ceiling on runners; `SMOLQUERY_BURST_MAX` caps one
 node and `SMOLQUERY_BURST_MAX_PER_JOB` one query. A runner sizes its DuckDB
 engine from the function, not from the coordinator's worker limits: three
-quarters of the function's memory and the VM's schedulers, or
+quarters of the function's memory (the rest for the BEAM, DuckDB's
+untracked read buffers and the partial) and the VM's schedulers, or
 `SMOLQUERY_BURST_RUNNER_MEMORY_LIMIT` and `SMOLQUERY_BURST_RUNNER_THREADS`
 set as the function's environment variables (T-695). Beyond those two the
 function needs no
@@ -218,7 +219,7 @@ One note per release, newest first.
 
 ### 0.25.1: a burst runner sizes its engine from its own host (T-695)
 
-**TL;DR.** A runner's DuckDB engine took the coordinator's worker limits (`SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT`, `_THREADS`), sized for the coordinator's host. On a 10 GB function under a 20 GB limit DuckDB never spilled before Lambda killed the runner, and the shard failed over to a peer, slower and dearer than no burst. A runner now takes three quarters of `AWS_LAMBDA_FUNCTION_MEMORY_SIZE` and the VM's online schedulers, or `SMOLQUERY_BURST_RUNNER_MEMORY_LIMIT` and `SMOLQUERY_BURST_RUNNER_THREADS` from the function's environment. A local runner (`SMOLQUERY_BURST_BACKEND=local`) shares the coordinator's host and keeps its limits. Nothing to do unless you want the overrides.
+**TL;DR.** A runner's DuckDB engine took the coordinator's worker limits (`SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT`, `_THREADS`), sized for the coordinator's host. On a 10 GB function under a 20 GB limit DuckDB never spilled before Lambda killed the runner, and the shard failed over to a peer, slower and dearer than no burst. A runner now takes three quarters of its host's memory (`AWS_LAMBDA_FUNCTION_MEMORY_SIZE` on Lambda, else the cgroup limit or `MemTotal`) and the VM's online schedulers, or `SMOLQUERY_BURST_RUNNER_MEMORY_LIMIT` and `SMOLQUERY_BURST_RUNNER_THREADS` from the function's environment. A local runner (`SMOLQUERY_BURST_BACKEND=local`) shares the coordinator's host and keeps its limits. Nothing to do unless you want the overrides.
 
 ### 0.25.0: burst, a query's scan on ephemeral runners (PL-77, T-674 to T-679, T-682, T-691)
 

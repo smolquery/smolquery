@@ -124,7 +124,7 @@ defmodule Smolquery.BurstTest do
     end
   end
 
-  describe "runner_limits/0" do
+  describe "runner_limits/1" do
     setup do
       previous = System.get_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
       System.delete_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
@@ -134,47 +134,58 @@ defmodule Smolquery.BurstTest do
           do: System.put_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", previous),
           else: System.delete_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
       end)
+
+      %{coordinator: [memory_limit: "20GB", threads: 32]}
     end
 
-    test "is empty on a node that is not a runner, whatever is configured" do
+    test "keeps the coordinator's limits on a node that is not a runner, whatever is configured",
+         %{coordinator: coordinator} do
       Application.put_env(:smolquery, Burst, runner_memory_limit: "7GB", runner_threads: 6)
       System.put_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "10240")
-      assert Burst.runner_limits() == []
+      assert Burst.runner_limits(coordinator) == coordinator
     end
 
-    test "a runner with no Lambda and no overrides sizes threads from the VM" do
+    test "a runner with no overrides sizes from its host", %{coordinator: coordinator} do
       FlameParent.put_env()
       Application.delete_env(:smolquery, Burst)
-      assert Burst.runner_limits() == [threads: System.schedulers_online()]
+      {:ok, bytes} = Burst.HostMemory.bytes()
+
+      assert Burst.runner_limits(coordinator) == [
+               memory_limit: "#{div(bytes * 3, 4 * 1024 * 1024)}MB",
+               threads: System.schedulers_online()
+             ]
     end
 
-    test "a Lambda runner takes three quarters of the function's memory" do
+    test "a Lambda runner takes three quarters of the function's memory", %{
+      coordinator: coordinator
+    } do
       FlameParent.put_env()
       Application.delete_env(:smolquery, Burst)
       System.put_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "10240")
 
-      assert Burst.runner_limits() == [
+      assert Burst.runner_limits(coordinator) == [
                memory_limit: "7680MB",
                threads: System.schedulers_online()
              ]
     end
 
-    test "the configured overrides win over the host" do
+    test "the configured overrides win over the host", %{coordinator: coordinator} do
       FlameParent.put_env()
       Application.put_env(:smolquery, Burst, runner_memory_limit: "7GB", runner_threads: 6)
       System.put_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "10240")
 
-      assert Burst.runner_limits() == [memory_limit: "7GB", threads: 6]
+      assert Burst.runner_limits(coordinator) == [memory_limit: "7GB", threads: 6]
     end
 
-    test "a memory size that is not a positive integer is ignored" do
+    test "an override set to nil falls back like an unset one", %{coordinator: coordinator} do
       FlameParent.put_env()
-      Application.delete_env(:smolquery, Burst)
+      Application.put_env(:smolquery, Burst, runner_memory_limit: nil, runner_threads: nil)
+      System.put_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "4096")
 
-      for junk <- ["", "lots", "0", "-1", "10GB"] do
-        System.put_env("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", junk)
-        assert Burst.runner_limits() == [threads: System.schedulers_online()]
-      end
+      assert Burst.runner_limits(coordinator) == [
+               memory_limit: "3072MB",
+               threads: System.schedulers_online()
+             ]
     end
   end
 
