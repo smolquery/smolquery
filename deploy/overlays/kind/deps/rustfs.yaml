@@ -49,7 +49,7 @@ spec:
                   - -c
                   - >-
                     n=0;
-                    until curl -s -o /dev/null -w '%{http_code}' -X PUT
+                    until curl -s --max-time 2 -o /dev/null -w '%{http_code}' -X PUT
                     --aws-sigv4 aws:amz:us-east-1:s3
                     --user "$RUSTFS_ACCESS_KEY:$RUSTFS_SECRET_KEY"
                     http://localhost:9000/smolquery-sealed | grep -qE '^(200|409)$';

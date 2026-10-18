@@ -80,7 +80,7 @@ jobs:
         ports:
           - 9000:9000
         options: >-
-          --health-cmd "curl -s -o /dev/null http://localhost:9000/"
+          --health-cmd "curl -sf --max-time 2 -o /dev/null --aws-sigv4 aws:amz:us-east-1:s3 --user smolquery:smolquery-secret http://localhost:9000/"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10

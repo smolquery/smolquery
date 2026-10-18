@@ -322,7 +322,7 @@ extensions, serve Parquet over a real HTTP server, boot `:peer` nodes (`epmd`
 must be running: `epmd -daemon`), and expect a Postgres on `localhost:5432`
 (`postgres`/`postgres`, override with `TEST_POSTGRES_*`) and a RustFS on
 `localhost:9000` (`smolquery`/`smolquery-secret`, override with `TEST_S3_*`).
-`mise run services` starts both RustFS and its test bucket.
+`mise run services` starts RustFS.
 
 The DuckLake catalog suite creates and uses a `smolquery_test` database rather
 than sharing `postgres`. DuckLake's metadata tables carry no primary keys, and
