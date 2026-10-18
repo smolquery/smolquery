@@ -161,6 +161,23 @@ defmodule SmolqueryWeb.QueryLiveTest do
       assert render_click(lv, "cancel") =~ "done"
     end
 
+    test "the job status renders on its own row under the controls (T-697)", %{
+      conn: conn,
+      query: query
+    } do
+      start_web!(query_name: query)
+
+      {:ok, lv, _html} = live(conn, ~p"/query")
+
+      refute has_element?(lv, "#job-status")
+
+      render_submit(lv, "run", %{"query" => %{"sql" => "SELECT 1 AS n"}})
+
+      assert Eventually.until(fn -> has_element?(lv, "#job-status .badge", "done") end)
+      assert has_element?(lv, "#job-status", "1 rows")
+      refute has_element?(lv, "#job-status button")
+    end
+
     test "a run renders the scan statistics line", %{conn: conn, query: query} do
       start_web!(query_name: query)
 

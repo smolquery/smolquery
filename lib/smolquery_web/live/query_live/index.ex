@@ -386,7 +386,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
           phx-hook=".SubmitOnMetaEnter"
           class="textarea textarea-bordered w-full font-mono"
         >{@sql}</textarea>
-        <div class="flex gap-2 items-center">
+        <div class="flex flex-wrap gap-2 items-center">
           <button type="submit" class="btn btn-primary btn-sm" disabled={running?(@job)}>
             Run ⌘⏎
           </button>
@@ -456,24 +456,26 @@ defmodule SmolqueryWeb.QueryLive.Index do
           >
             Cancel
           </button>
-          <span :if={@job} class={["badge", state_badge(@job.state)]}>{@job.state}</span>
+        </div>
+        <div :if={@job} id="job-status" class="flex flex-wrap gap-2 items-center whitespace-nowrap">
+          <span class={["badge", state_badge(@job.state)]}>{@job.state}</span>
           <span
-            :if={@job && @job.scatter}
+            :if={@job.scatter}
             class="badge badge-accent"
             title={scatter_title(@job.scatter)}
           >
             {scatter_badge(@job.scatter)}
           </span>
-          <span :if={@job && @job.scatter && refusal_badge(@job.scatter)} class="badge badge-ghost">
+          <span :if={@job.scatter && refusal_badge(@job.scatter)} class="badge badge-ghost">
             {refusal_badge(@job.scatter)}
           </span>
-          <span :if={@job && @job.file_cache} class="badge badge-ghost">
+          <span :if={@job.file_cache} class="badge badge-ghost">
             {cache_badge(@job.file_cache)}
           </span>
-          <span :if={@job && @job.duration_ms} class="text-sm opacity-70">
+          <span :if={@job.duration_ms} class="text-sm opacity-70">
             {@job.duration_ms} ms
           </span>
-          <span :if={@job && @job.row_count} class="text-sm opacity-70">
+          <span :if={@job.row_count} class="text-sm opacity-70">
             {@job.row_count} rows
           </span>
         </div>
