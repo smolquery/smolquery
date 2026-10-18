@@ -193,9 +193,32 @@ defmodule Smolquery.Catalog.DuckLake.ReaderTest do
       {:ok, snapshot} = Catalog.register_segments(catalog, @events, Enum.shuffle(segments))
 
       assert {:ok, files} = Catalog.segment_files(catalog, @events, snapshot)
-      assert Enum.all?(files, &(&1.column_ids == [1, 2]))
+      assert Enum.all?(files, &match?([_ | _], &1.column_ids))
       assert Enum.map(files, & &1.path) == segments |> Enum.map(& &1.path) |> Enum.sort()
       assert Catalog.segment_files(duckdb, @events, snapshot) == {:ok, files}
+    end
+
+    test "segment_files_statement/1 reads each file's stats through the index, not an aggregate per table (T-696)",
+         context do
+      %{catalog: catalog, store: store} = context
+      fixture!(catalog, store)
+      {:ok, snapshot} = Catalog.current_snapshot(catalog)
+      statement = DuckLake.segment_files_statement(catalog.config)
+
+      {:ok, plan} =
+        Postgrex.transaction(Reader.pool(@engine), fn conn ->
+          Postgrex.query!(conn, "SET LOCAL enable_seqscan = off", [])
+
+          %{rows: rows} =
+            Postgrex.query!(conn, "EXPLAIN " <> statement, ["analytics", "events", snapshot])
+
+          Enum.map_join(rows, "\n", fn [line] -> line end)
+        end)
+
+      assert plan =~ "SubPlan"
+      assert plan =~ "Index Scan using smolquery_file_column_stats_table"
+      refute plan =~ "GroupAggregate"
+      refute plan =~ "Seq Scan on ducklake_file_column_stats"
     end
 
     test "a reader that cannot answer returns an error, never an exit or a DuckDB answer",

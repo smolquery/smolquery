@@ -841,22 +841,45 @@ defmodule Smolquery.Catalog.DuckLake do
       when is_integer(snapshot) do
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
-         {:ok, result} <- read(config, &segment_files_sql/1, [dataset, table, snapshot]) do
+         {:ok, result} <-
+           read(config, &segment_files_statement/1, [dataset, table, snapshot]) do
       segment_file_rows(result.rows)
     end
   end
 
-  defp segment_files_sql(%__MODULE__{reader: nil} = config),
-    do: segment_files_sql(config, "list", "df.path")
+  @doc """
+  The statement `segment_files/3` reads with, for `config`'s path: DuckDB's
+  when it has no reader, else Postgres's. It binds the dataset, the table and
+  the snapshot as `$1`, `$2` and `$3`.
 
-  defp segment_files_sql(config),
-    do: segment_files_sql(config, "array_agg", ~s|df.path COLLATE "C"|)
+  Public so a test can `EXPLAIN` the statement the reader runs.
 
-  defp segment_files_sql(config, aggregate, order) do
+  Each live file reads its column ids with its own subquery, so on Postgres
+  the cost is the file count times one read of
+  `smolquery_file_column_stats_table`, the `(table_id, data_file_id)` index
+  `Smolquery.Catalog.Migrations.DucklakeReadIndexes` builds. The reader once
+  joined the stats to the live files and aggregated them per table instead.
+  Postgres estimated the live files at one row, so it planned a nested loop
+  that ran the whole aggregate again for every file. On the sandbox that took
+  158-459 ms at 153 files and more than the pool's 15 s at 1,730, where every
+  scatter fell back to the coordinator. The subquery reads the 153 files in
+  9-10 ms and the 1,730 in 79-340 ms (T-696).
+
+  The two paths differ only in the order: Postgres sorts the paths
+  `COLLATE "C"` to match DuckDB's byte order.
+  """
+  @spec segment_files_statement(t()) :: String.t()
+  def segment_files_statement(%__MODULE__{reader: nil} = config),
+    do: segment_files_statement(config, "df.path")
+
+  def segment_files_statement(%__MODULE__{} = config),
+    do: segment_files_statement(config, ~s|df.path COLLATE "C"|)
+
+  defp segment_files_statement(config, order) do
     "SELECT df.path, df.path_is_relative, " <>
       "CAST(COALESCE(df.record_count, 0) AS BIGINT), " <>
       "CAST(COALESCE(df.file_size_bytes, 0) AS BIGINT), df.begin_snapshot, " <>
-      "(SELECT #{aggregate}(fcs.column_id ORDER BY fcs.column_id) " <>
+      "(SELECT array_agg(fcs.column_id ORDER BY fcs.column_id) " <>
       "FROM #{meta(config, "ducklake_file_column_stats")} fcs " <>
       "WHERE fcs.table_id = df.table_id AND fcs.data_file_id = df.data_file_id) " <>
       "FROM #{live_files_joins(config)} WHERE #{@live_files} ORDER BY #{order}"
