@@ -1133,10 +1133,12 @@ Properties worth knowing:
   functions a FROM clause may name — pure generators (`range`,
   `generate_series`, `repeat`, `unnest`) and nothing that reads a file, a
   catalog, or a socket. After planning, each job engine also disables DuckDB's
-  external access. Readable is exactly the runtime's `allowed_directories`
-  (the data dir and catalog paths by default) plus the plan's own
-  micro-segment URLs. The configuration is locked, so SQL cannot turn it back
-  on. The only options left settable are the ones DuckLake sets on its
+  external access, and so does every shard engine a scattered query runs on
+  a peer or a burst runner (T-690). Readable is exactly the runtime's
+  `allowed_directories` (the data dir and catalog paths by default) plus the
+  plan's own micro-segment URLs; a shard engine adds only its own fresh
+  output directory, which is where its partial is written. The
+  configuration is locked, so SQL cannot turn it back on. The only options left settable are the ones DuckLake sets on its
   metadata connection at every transaction (`allowed_configs`,
   `Smolquery.QueryService.Lockdown`); DuckDB 2.0 refuses them under the lock
   otherwise. `lockdown: false` restores the trusted posture, and drops both gates
@@ -1402,7 +1404,8 @@ Three layers protect the system. Each layer fails closed:
   cluster sets `SMOLQUERY_INTERNAL_SECRET` everywhere, or reads fail with
   401s.
 - **User SQL** passes the planner's table-function allowlist, then runs with
-  DuckDB's external access disabled and locked. Readable is exactly
+  DuckDB's external access disabled and locked, on the job engine and on
+  every shard engine alike (T-690). Readable is exactly
   `allowed_directories`, the micro-segment URLs the plan itself produced, and
   the sealed tier's `s3://<bucket>/` prefix when the sealed tier is an object
   store. The allowlist covers the readers external access does not — DuckDB's

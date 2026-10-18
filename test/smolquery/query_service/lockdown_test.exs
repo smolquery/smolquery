@@ -4,7 +4,7 @@ defmodule Smolquery.QueryService.LockdownTest do
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.QueryService.Lockdown
 
-  describe "statements/3" do
+  describe "statements/2" do
     test "lists first, external access off, DuckLake's options exempted, then the lock" do
       assert Lockdown.statements(["/data", "s3://sealed/"], ["http://hot/a.parquet"]) == [
                "SET allowed_directories = ['/data', 's3://sealed/']",
@@ -15,15 +15,8 @@ defmodule Smolquery.QueryService.LockdownTest do
              ]
     end
 
-    test "keeps external access on when asked, and still exempts before locking" do
-      statements = Lockdown.statements([], [], external_access: true)
-
-      refute "SET enable_external_access = false" in statements
-
-      assert Enum.take(statements, -2) == [
-               DuckLake.allowed_configs_statement(),
-               "SET lock_configuration = true"
-             ]
+    test "always closes external access: the lists bind nothing while it is open (T-690)" do
+      assert "SET enable_external_access = false" in Lockdown.statements([], [])
     end
   end
 end

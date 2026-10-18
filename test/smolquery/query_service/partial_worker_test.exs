@@ -123,6 +123,53 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       assert {:ok, %{parquet: parquet, spilled: nil}} = PartialWorker.run_standalone(request)
       assert is_binary(parquet)
     end
+
+    test "under lockdown the shard reads nothing outside its lists, the host's tmp included (T-690)",
+         %{request: request} do
+      outside = parquet_in_the_hosts_tmp()
+      request = %{request | partial_sql: "SELECT count(*) AS s FROM read_parquet('#{outside}')"}
+
+      assert {:error, reason} = PartialWorker.run_standalone(request)
+      assert inspect(reason) =~ "Cannot access file"
+    end
+
+    test "without lockdown the shard keeps the trusted posture and reads the same file",
+         %{request: request} do
+      outside = parquet_in_the_hosts_tmp()
+
+      request = %{
+        request
+        | engine: %{request.engine | lockdown: false},
+          partial_sql: "SELECT count(*) AS s FROM read_parquet('#{outside}')"
+      }
+
+      assert {:ok, %{rows: 1, parquet: parquet}} = PartialWorker.run_standalone(request)
+      assert DataFrame.to_columns(DataFrame.load_parquet!(parquet))["s"] == [3]
+    end
+
+    test "the shard's output directory does not outlive it", %{request: request} do
+      before = output_directories()
+
+      assert {:ok, _reply} = PartialWorker.run_standalone(request)
+      assert {:error, _reason} = PartialWorker.run_standalone(%{request | partial_sql: "SELECT"})
+
+      assert output_directories() == before
+    end
+
+    defp parquet_in_the_hosts_tmp do
+      path =
+        Path.join(
+          System.tmp_dir!(),
+          "smolquery-outside-#{System.unique_integer([:positive])}.parquet"
+        )
+
+      DataFrame.to_parquet!(DataFrame.new(%{"id" => [1, 2, 3]}), path)
+      on_exit(fn -> File.rm(path) end)
+      path
+    end
+
+    defp output_directories,
+      do: System.tmp_dir!() |> Path.join("smolquery-partial-*") |> Path.wildcard() |> Enum.sort()
   end
 
   describe "standalone_options/1" do

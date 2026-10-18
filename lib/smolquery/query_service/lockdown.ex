@@ -6,15 +6,21 @@ defmodule Smolquery.QueryService.Lockdown do
   works.
 
   The lists come first: `allowed_directories` and `allowed_paths` say what
-  the engine may still read once external access closes. External access
-  then closes, unless the caller keeps it (a partial worker's `COPY ... TO`
-  needs it, and the two lists bound what it can reach). Then `allowed_configs`
-  names the options DuckLake sets on its metadata connection at every
-  transaction (`Smolquery.Catalog.DuckLake.allowed_configs_statement/0`),
-  and last `lock_configuration` seals everything, including that list. The
-  order is the whole point: a `SET` after the lock is refused whatever its
-  value, so a lockdown that locked before exempting DuckLake's options would
-  fail every read of the lake with "Current transaction is aborted".
+  the engine may still reach once external access closes. External access
+  then closes. DuckDB reads the two lists as the exceptions to a closed
+  engine and nothing else: with access open they bind nothing, which is why
+  there is no option to keep it open (T-690). A `COPY ... TO` into an allowed
+  directory still works with access closed, so a partial worker writes its
+  partial under the same lockdown a job engine runs under. Then
+  `allowed_configs` names the options DuckLake sets on its metadata
+  connection at every transaction
+  (`Smolquery.Catalog.DuckLake.allowed_configs_statement/0`), and last
+  `lock_configuration` seals everything, including that list. The order is
+  the whole point: a `SET` after the lock is refused whatever its value, so a
+  lockdown that locked before exempting DuckLake's options would fail every
+  read of the lake with "Current transaction is aborted". DuckDB's own spill
+  files are not subject to the lists; the engine spills with access closed
+  wherever its `temp_directory` points.
   """
 
   alias Smolquery.Catalog.DuckLake
@@ -22,20 +28,15 @@ defmodule Smolquery.QueryService.Lockdown do
 
   @doc """
   The lockdown statements for an engine allowed `directories` and `paths`.
-
-  `external_access: true` keeps `enable_external_access` on; the default
-  turns it off.
   """
-  @spec statements([String.t()], [String.t()], external_access: boolean()) :: [String.t()]
-  def statements(directories, paths, opts \\ []) do
+  @spec statements([String.t()], [String.t()]) :: [String.t()]
+  def statements(directories, paths) do
     [
       "SET allowed_directories = #{Identifier.sql_list(directories)}",
-      "SET allowed_paths = #{Identifier.sql_list(paths)}"
-    ] ++
-      external_access(Keyword.get(opts, :external_access, false)) ++
-      [DuckLake.allowed_configs_statement(), "SET lock_configuration = true"]
+      "SET allowed_paths = #{Identifier.sql_list(paths)}",
+      "SET enable_external_access = false",
+      DuckLake.allowed_configs_statement(),
+      "SET lock_configuration = true"
+    ]
   end
-
-  defp external_access(true), do: []
-  defp external_access(false), do: ["SET enable_external_access = false"]
 end

@@ -83,14 +83,17 @@ defmodule Smolquery.QueryService.PartialWorker do
   ## Lockdown
 
   The partial SQL derives from user SQL, so the engine is confined the way
-  a job engine is: `allowed_directories` is exactly this shard's output
+  a job engine is: `allowed_directories` is exactly this shard's own output
   directory, the node's own allowed data directories, and the sealed
   store's prefix; `allowed_paths` is the shard's hot URLs; and
-  `Smolquery.QueryService.Lockdown` orders the rest, DuckLake's exempted
-  options before the lock. `enable_external_access` stays on —
-  `COPY ... TO` needs it — and while it is on DuckDB applies neither list
-  (T-690), so what the lock seals today is the configuration, honoring the
-  runtime's `lockdown` flag the same way `Runner` does.
+  `Smolquery.QueryService.Lockdown` orders the rest, external access off,
+  DuckLake's exempted options before the lock. The `COPY ... TO` that
+  writes the partial lands in the output directory, which is allowed, so
+  it needs no open access (T-690). The output directory is one fresh
+  directory per shard under the system temporary directory, not that
+  directory itself: on a runner the host's temporary directory also holds
+  what the bootstrap wrote, and the shard may read none of it. A shard
+  honors the runtime's `lockdown` flag the same way `Runner` does.
 
   ## The spill (PL-77 D6)
 
@@ -332,14 +335,14 @@ defmodule Smolquery.QueryService.PartialWorker do
   defp execute(engine, request, decision, plan, {source, engine_us}) do
     started = System.monotonic_time(:microsecond)
 
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "smolquery-partial-#{System.unique_integer([:positive])}.parquet"
-      )
+    directory =
+      Path.join(System.tmp_dir!(), "smolquery-partial-#{System.unique_integer([:positive])}")
+
+    path = Path.join(directory, "partial.parquet")
 
     try do
-      with :ok <- apply_statements(engine.connection, plan.settings),
+      with :ok <- output_directory(directory),
+           :ok <- apply_statements(engine.connection, plan.settings),
            :ok <- apply_statements(engine.connection, plan.functions),
            {describe_us, {:ok, files}} <-
              Telemetry.timed(fn -> described(engine.connection, request.files) end),
@@ -384,7 +387,14 @@ defmodule Smolquery.QueryService.PartialWorker do
       end
     after
       JobEngine.stop(engine)
-      File.rm(path)
+      File.rm_rf(directory)
+    end
+  end
+
+  defp output_directory(directory) do
+    case File.mkdir_p(directory) do
+      :ok -> :ok
+      {:error, posix} -> {:error, {:output_directory_failed, directory, posix}}
     end
   end
 
@@ -480,7 +490,7 @@ defmodule Smolquery.QueryService.PartialWorker do
     directories =
       [Path.dirname(path) | allowed_directories] ++ EngineSecrets.sealed_prefixes(store)
 
-    Lockdown.statements(directories, allowed_paths, external_access: true)
+    Lockdown.statements(directories, allowed_paths)
   end
 
   defp copy_out(connection, partial_sql, params, path, timeout_ms) do
