@@ -186,9 +186,9 @@ plain TCP inside the VPC; `inet_tls_dist` with a runner certificate is
 T-684. The policy's defaults come from the bench on 9 GB and 92 GB tables
 (T-683, the cost model on PL-77): `SMOLQUERY_BURST_MIN_SCAN_BYTES` 8 GiB,
 `SMOLQUERY_BURST_TARGET_BYTES` 256 MiB, `SMOLQUERY_BURST_MAX_PER_JOB` 64.
-Fewer than about 25 runners lost to the cluster on every shape, 50 to 100
-was flat, and high-cardinality groups are bound by the coordinator's merge
-(T-685) whatever the count.
+On 92 GB, 10 runners lost to the cluster on every shape and 25 won on every
+scan shape; 50 to 100 was flat; high-cardinality groups are bound by the
+coordinator's merge (T-685) whatever the count.
 
 ## When a peer dies without closing its sockets
 
@@ -231,7 +231,7 @@ One note per release, newest first.
 - **What a deployment sees without burst:** `deploy/base/api.yaml` pins the distribution listener to port `9100`, exposes it, and sets `POD_IP`. Peers keep finding each other through epmd; the pin only matters to a runner outside the pod network. The release boots as a bare runner when a FLAME backend set `FLAME_PARENT`, and `SMOLQUERY_ROLES=none` is accepted.
 - **The job record:** `scatter` gains `peers`, `burst`, `burstWaitMs`, `burstRefused` and `backend`; a distributed query's trace gains `gather`, `merge` and one `shard` span per worker, on the editor's waterfall and in the OTel traces.
 - **Partials:** a runner partial over 4 MiB is written to the sealed store under `burst-partials/` and deleted after the merge; give the runner's role `PutObject` there, on top of the `GetObject` and `ListBucket` it needs on the bucket to scan at all, the node's role `DeleteObject`, and add a one-day lifecycle rule as the backstop.
-- **Not yet:** TLS distribution to a runner (T-684); a coordinator reachable from outside the cluster's VPC, which a Lambda in the VPC does not need (T-689); the Supabase Compute backend (T-687); measured policy defaults from the 100-to-1,000 runner bench (T-683); the tree merge for high-cardinality shapes (T-685) and byte-weighted targets (T-686).
+- **Not yet:** TLS distribution to a runner (T-684); a coordinator reachable from outside the cluster's VPC, which a Lambda in the VPC does not need (T-689); the Supabase Compute backend (T-687); measured policy defaults from the 100-to-1,000 runner bench (T-683), since set by the 92 GB bench, see "Bursting to Lambda" above; the tree merge for high-cardinality shapes (T-685) and byte-weighted targets (T-686).
 
 ### 0.24.0: HyperDX reads metrics through the ClickHouse edge (T-501)
 

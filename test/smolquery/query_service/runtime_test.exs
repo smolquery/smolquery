@@ -40,6 +40,10 @@ defmodule Smolquery.QueryService.RuntimeTest do
       assert pool == Smolquery.Burst.pool()
       assert default.burst.min_scan_bytes == 8_589_934_592
       assert default.burst.target_bytes == 268_435_456
+
+      assert %Runtime{name: :struct_default, catalog: nil}.burst.target_bytes ==
+               Smolquery.Burst.policy()[:target_bytes]
+
       assert default.burst.max_per_job == 64
       assert default.burst.retry_floor_ms == 5_000
       assert default.burst.max_inflight == 64

@@ -38,6 +38,13 @@ defmodule Smolquery.Burst.PolicyTest do
       assert Policy.runners(:auto, 100 * @gib, %{@config | max_per_job: 64}) == {:ok, 32}
     end
 
+    test "the default target gives a table at the threshold 32 runners and max_per_job caps 92 GB at 64 (T-683)" do
+      config = %{@config | target_bytes: 268_435_456, max_per_job: 64, max: 1000}
+
+      assert Policy.runners(:auto, 8 * @gib, config) == {:ok, 32}
+      assert Policy.runners(:auto, 92 * 10 ** 9, config) == {:ok, 64}
+    end
+
     test "a scan of zero bytes over a zero threshold still takes one runner" do
       assert Policy.runners(:auto, 0, %{@config | min_scan_bytes: 0}) == {:ok, 1}
     end

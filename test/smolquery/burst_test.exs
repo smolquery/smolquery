@@ -2,7 +2,6 @@ defmodule Smolquery.BurstTest do
   use ExUnit.Case, async: false
 
   alias Smolquery.Burst
-  alias Smolquery.Burst.Policy
   alias Smolquery.Test.FlameParent
 
   setup do
@@ -254,16 +253,6 @@ defmodule Smolquery.BurstTest do
       )
 
       assert FLAME.call(name, fn -> {:ran_on, node()} end) == {:ran_on, node()}
-    end
-  end
-
-  describe "policy/0" do
-    test "the default target gives a table at the threshold 32 runners and caps 92 GB at max_per_job (T-683)" do
-      policy = Burst.policy() |> Map.new() |> Map.put(:enabled, true)
-
-      assert policy.target_bytes == 268_435_456
-      assert Policy.runners(:auto, policy.min_scan_bytes, policy) == {:ok, 32}
-      assert Policy.runners(:auto, 92 * 10 ** 9, policy) == {:ok, 64}
     end
   end
 end

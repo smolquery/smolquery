@@ -4,13 +4,17 @@ defmodule Smolquery.Burst.Policy do
 
   A job asks with `burst: false | :auto | n`. `false` is peers only. `:auto`
   bursts when the sealed scan is at least `min_scan_bytes`, with one runner
-  per `target_bytes` of it, so a 16 GB scan over a 256 MiB target asks for 64
+  per `target_bytes` of it, so a 16 GiB scan over a 256 MiB target asks for 64
   runners, the per-job cap, and a dashboard query over a few hundred MB asks
   for none. The target is a quarter of what a peer takes because a runner
-  reads S3 at about a quarter of a pod's rate (1 GB/s against 4, T-683): a
-  table at the 8 GiB threshold gets 32 runners, past the point where burst
-  starts to win, where a 1 GiB target gave it 8, which lost on every shape
-  measured. An integer asks for exactly that many. Every answer is capped at
+  reads S3 at about a quarter of a pod's rate (1 GB/s against 4, T-683): on
+  a 92 GB table 10 runners lost to the peers on every shape and 25 won on
+  every scan shape, so a table at the 8 GiB threshold asks for 32, where a
+  1 GiB target asked for 8. The count is a request:
+  `Smolquery.QueryService.Scatter` deals sealed files round-robin over peers
+  and runners, so a table of few large files gives fewer runner shards than
+  asked, each at least one file, until byte-weighted targets land (T-686).
+  An integer asks for exactly that many. Every answer is capped at
   `max_per_job` and at the pool's `max`: a runner past the pool's max would
   only queue for a checkout behind the first wave.
 
