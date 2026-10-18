@@ -220,6 +220,15 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### 0.25.4: shard engines locked down, a smaller `auto` target, the tree merge (T-690, T-683, T-685, T-698)
+
+**TL;DR.** Every shard engine on a peer or a burst runner now runs with DuckDB external access off, like the job engine; `auto` sizes a runner at 256 MiB of sealed scan instead of 1 GiB; spilled runner partials merge on runners in levels before the coordinator's final; a SQLite catalog runs in WAL mode and every catalog write retries a lock.
+
+- **Lockdown binds on shards (T-690).** The partial worker kept external access on for its `COPY ... TO`, which DuckDB does not need, and with access on the allowed directories and paths bound nothing. A shard engine could read any file or URL its process reached. It now closes access and writes its partial into a fresh per-shard directory under the spill root (`SMOLQUERY_SPILL_DIR`, else the system tmp), the only local directory it adds. A query that read a file outside the lists from a shard, which the planner's table-function allowlist already refused, now fails on the engine too.
+- **`SMOLQUERY_BURST_TARGET_BYTES` defaults to `268435456` (T-683).** The 92 GB bench showed a runner reads S3 at about a quarter of a pod's rate, 10 runners lost to the cluster on every shape and 25 won on every scan shape, so a table at the 8 GiB threshold now asks for 32 runners, not 8. A deployment that set the variable keeps its value. With the default pool of 64, an `auto` job over 16 GiB fills the node's pool; raise `SMOLQUERY_BURST_MAX` or lower `SMOLQUERY_BURST_MAX_PER_JOB` where such jobs run concurrently.
+- **Tree merge (T-685).** While more than `SMOLQUERY_BURST_MERGE_FAN_IN` (`16`) runner partials sit in the store, runners merge them in groups of that many, level by level, and the coordinator merges what is left; `1` disables it. The trace gains a `tree_merge` span and `merge_level` on merge shards. Nothing to configure; the runner role already has the bucket rights the spill needs.
+- **SQLite catalog in WAL mode (T-698).** A catalog on SQLite opens in WAL mode and every catalog write retries a locked database instead of failing the commit. A backup of the catalog file now copies its `-wal` and `-shm` files with it.
+
 ### 0.25.1: a burst runner sizes its engine from its own host (T-695)
 
 **TL;DR.** A runner's DuckDB engine took the coordinator's worker limits (`SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT`, `_THREADS`), sized for the coordinator's host. On a 10 GB function under a 20 GB limit DuckDB never spilled before Lambda killed the runner, and the shard failed over to a peer, slower and dearer than no burst. A runner now takes three quarters of its host's memory (`AWS_LAMBDA_FUNCTION_MEMORY_SIZE` on Lambda, else the smaller of the cgroup limit and `MemTotal`) and the VM's online schedulers, or `SMOLQUERY_BURST_RUNNER_MEMORY_LIMIT` and `SMOLQUERY_BURST_RUNNER_THREADS` from the function's environment. A local runner (`SMOLQUERY_BURST_BACKEND=local`) shares the coordinator's host and keeps its limits. Nothing to do unless you want the overrides.
