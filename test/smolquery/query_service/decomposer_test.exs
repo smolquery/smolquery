@@ -12,6 +12,7 @@ defmodule Smolquery.QueryService.DecomposerTest do
   alias Smolquery.Engine
   alias Smolquery.QueryService.ClickHouseFunctions
   alias Smolquery.QueryService.Decomposer
+  alias Smolquery.QueryService.Views
 
   @moduletag :tmp_dir
 
@@ -75,7 +76,8 @@ defmodule Smolquery.QueryService.DecomposerTest do
         define_view("true")
       end
 
-    merged = Engine.query!(@engine, Decomposer.final_sql(decomposition, read_parquet(paths)))
+    merged =
+      Engine.query!(@engine, Decomposer.final_sql(decomposition, Views.read_parquet(paths)))
 
     assert merged.columns == expected.columns
     assert_rows(expected.rows, merged.rows)
@@ -92,16 +94,18 @@ defmodule Smolquery.QueryService.DecomposerTest do
     both = repartial(decomposition, paths, tmp_dir)
     twice = repartial(decomposition, [both], tmp_dir)
     second_alone = repartial(decomposition, [second], tmp_dir)
-    expected = Engine.query!(@engine, Decomposer.final_sql(decomposition, read_parquet(paths)))
+
+    expected =
+      Engine.query!(@engine, Decomposer.final_sql(decomposition, Views.read_parquet(paths)))
 
     for from <- [[both], [first, second_alone]] do
       assert_rows(
         expected.rows,
-        Engine.query!(@engine, Decomposer.final_sql(decomposition, read_parquet(from))).rows
+        Engine.query!(@engine, Decomposer.final_sql(decomposition, Views.read_parquet(from))).rows
       )
     end
 
-    Engine.query!(@engine, Decomposer.final_sql(decomposition, read_parquet([twice])))
+    Engine.query!(@engine, Decomposer.final_sql(decomposition, Views.read_parquet([twice])))
   end
 
   defp repartial(decomposition, paths, tmp_dir) do
@@ -109,15 +113,12 @@ defmodule Smolquery.QueryService.DecomposerTest do
 
     Engine.query!(
       @engine,
-      "COPY (#{Decomposer.repartial_sql(decomposition, read_parquet(paths))}) TO " <>
+      "COPY (#{Decomposer.repartial_sql(decomposition, Views.read_parquet(paths))}) TO " <>
         "#{Smolquery.Identifier.sql_string(path)} (FORMAT parquet)"
     )
 
     path
   end
-
-  defp read_parquet(paths),
-    do: "read_parquet([#{Enum.map_join(paths, ", ", &Smolquery.Identifier.sql_string/1)}])"
 
   defp assert_rows(expected, merged) do
     assert length(expected) == length(merged)
@@ -489,7 +490,7 @@ defmodule Smolquery.QueryService.DecomposerTest do
           "#{Smolquery.Identifier.sql_string(parquet)} (FORMAT parquet)"
       )
 
-      from = "read_parquet([#{Smolquery.Identifier.sql_string(parquet)}])"
+      from = Views.read_parquet([parquet])
 
       assert Engine.query!(@engine, Decomposer.final_sql(decomposition, from)).rows == [[7, true]]
     end

@@ -326,7 +326,8 @@ defmodule Smolquery.QueryService.Runtime do
             retry_floor_ms: non_neg_integer(),
             max_inflight: pos_integer(),
             spill_inline_max_bytes: non_neg_integer(),
-            spill_prefix: String.t()
+            spill_prefix: String.t(),
+            merge_fan_in: pos_integer()
           }
         }
 
