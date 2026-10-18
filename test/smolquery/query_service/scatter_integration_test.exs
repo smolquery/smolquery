@@ -165,9 +165,9 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
       else: burst
   end
 
-  defp seed_store(tmp_dir), do: Local.new(dir: Path.join(tmp_dir, "seg"))
-
   defp burst(_context), do: []
+
+  defp seed_store(tmp_dir), do: Local.new(dir: Path.join(tmp_dir, "seg"))
 
   defp attach_shard_decisions do
     parent = self()

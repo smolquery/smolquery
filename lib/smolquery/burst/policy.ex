@@ -145,17 +145,17 @@ defmodule Smolquery.Burst.Policy do
   @spec merge_shards([[partial()]], [peer], merge_config()) :: [{merge_host(peer), [partial()]}]
         when peer: term()
   def merge_shards(groups, peers, %{merge_peer_weight: weight}) do
-    on_peers = min(length(groups), weight * length(peers))
+    peer_count = length(peers)
+    on_peers = min(length(groups), weight * peer_count)
     {for_peers, for_runners} = Enum.split(groups, on_peers)
 
-    shards =
+    peer_shards =
       for_peers
-      |> Enum.chunk_every(max(ceil_div(on_peers, max(length(peers), 1)), 1))
+      |> Enum.chunk_every(max(ceil_div(on_peers, max(peer_count, 1)), 1))
       |> Enum.zip_with(peers, fn chunk, peer -> {{:peer, peer}, List.flatten(chunk)} end)
-      |> Enum.concat(Enum.map(for_runners, &{:runner, &1}))
 
-    case shards do
-      [_, _ | _] -> shards
+    case peer_shards ++ Enum.map(for_runners, &{:runner, &1}) do
+      [_, _ | _] = shards -> shards
       _one_or_none -> []
     end
   end

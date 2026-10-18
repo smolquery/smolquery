@@ -611,7 +611,7 @@ defmodule Smolquery.QueryService.Scatter do
   defp rotated_peers(%{peers: []}), do: []
 
   defp rotated_peers(%{peers: peers, job_id: job_id}) do
-    {head, tail} = Enum.split(peers, rem(:erlang.phash2(job_id), length(peers)))
+    {head, tail} = Enum.split(peers, :erlang.phash2(job_id, length(peers)))
     tail ++ head
   end
 
@@ -677,13 +677,15 @@ defmodule Smolquery.QueryService.Scatter do
   end
 
   defp advanced(stats, targets, consumed) do
+    shards = length(targets)
+
     %{
       stats
       | level: stats.level + 1,
-        shards: stats.shards + length(targets),
+        shards: stats.shards + shards,
         peer_shards: stats.peer_shards + Enum.count(targets, &(elem(&1, 0).kind == :peer)),
         consumed: stats.consumed ++ consumed,
-        next_index: stats.next_index + length(targets)
+        next_index: stats.next_index + shards
     }
   end
 
