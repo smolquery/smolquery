@@ -265,7 +265,9 @@ defmodule Smolquery.QueryService.Runtime do
       max_inflight: 64,
       spill_inline_max_bytes: 4_194_304,
       spill_prefix: "burst-partials",
-      merge_fan_in: 16
+      merge_fan_in: 16,
+      merge_target_bytes: 134_217_728,
+      merge_min_bytes: 536_870_912
     }
   ]
 
@@ -327,7 +329,9 @@ defmodule Smolquery.QueryService.Runtime do
             max_inflight: pos_integer(),
             spill_inline_max_bytes: non_neg_integer(),
             spill_prefix: String.t(),
-            merge_fan_in: pos_integer()
+            merge_fan_in: pos_integer(),
+            merge_target_bytes: pos_integer(),
+            merge_min_bytes: non_neg_integer()
           }
         }
 
@@ -471,7 +475,9 @@ defmodule Smolquery.QueryService.Runtime do
       max_inflight: Keyword.fetch!(policy, :max_inflight),
       spill_inline_max_bytes: Keyword.fetch!(policy, :spill_inline_max_bytes),
       spill_prefix: Keyword.fetch!(policy, :spill_prefix),
-      merge_fan_in: Keyword.fetch!(policy, :merge_fan_in)
+      merge_fan_in: Keyword.fetch!(policy, :merge_fan_in),
+      merge_target_bytes: Keyword.fetch!(policy, :merge_target_bytes),
+      merge_min_bytes: Keyword.fetch!(policy, :merge_min_bytes)
     }
   end
 

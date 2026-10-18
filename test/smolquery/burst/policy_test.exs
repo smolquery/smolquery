@@ -58,6 +58,67 @@ defmodule Smolquery.Burst.PolicyTest do
     end
   end
 
+  @mib 1_048_576
+  @merge %{merge_fan_in: 16, merge_target_bytes: 128 * @mib, merge_min_bytes: 0}
+
+  defp partials(sizes), do: Enum.with_index(sizes, fn bytes, i -> %{index: i, bytes: bytes} end)
+
+  describe "merge_groups/2 (T-700)" do
+    test "fills a shard up to merge_target_bytes in landing order" do
+      spilled = partials(List.duplicate(25 * @mib, 12))
+
+      assert [first, second, third] = Policy.merge_groups(spilled, @merge)
+      assert Enum.map(first, & &1.index) == [0, 1, 2, 3, 4]
+      assert Enum.map(second, & &1.index) == [5, 6, 7, 8, 9]
+      assert Enum.map(third, & &1.index) == [10, 11]
+    end
+
+    test "merge_fan_in caps a shard's inputs however small they are" do
+      assert @merge
+             |> Map.put(:merge_fan_in, 3)
+             |> then(&Policy.merge_groups(partials(List.duplicate(@mib, 7)), &1))
+             |> Enum.map(&length/1) == [3, 3]
+    end
+
+    test "two partials always share a shard, even over the target, and a last one alone stays put" do
+      sizes = [85 * @mib, 85 * @mib, 85 * @mib, 85 * @mib, 85 * @mib]
+
+      assert [[%{index: 0}, %{index: 1}], [%{index: 2}, %{index: 3}]] =
+               Policy.merge_groups(partials(sizes), @merge)
+
+      assert [[_, _]] =
+               Policy.merge_groups(partials([300 * @mib, 300 * @mib, 200 * @mib]), @merge)
+
+      assert [] == Policy.merge_groups(partials([600 * @mib]), @merge)
+    end
+
+    test "under merge_min_bytes the coordinator merges alone" do
+      sizes = List.duplicate(50 * @mib, 10)
+
+      assert [] == Policy.merge_groups(partials(sizes), %{@merge | merge_min_bytes: 512 * @mib})
+
+      assert [_, _, _, _, _] =
+               Policy.merge_groups(partials(sizes), %{@merge | merge_min_bytes: 500 * @mib})
+
+      assert [] == Policy.merge_groups([], @merge)
+    end
+
+    test "a fan-in under 2 turns the tree off" do
+      sizes = List.duplicate(50 * @mib, 100)
+
+      assert [] == Policy.merge_groups(partials(sizes), %{@merge | merge_fan_in: 1})
+    end
+  end
+
+  describe "merge_shrank?/2" do
+    test "a level earns the next when it at least halved the bytes" do
+      assert Policy.merge_shrank?(2_000, 1_000)
+      assert Policy.merge_shrank?(2_000, 600)
+      refute Policy.merge_shrank?(2_000, 1_001)
+      assert Policy.merge_shrank?(0, 0)
+    end
+  end
+
   describe "reason/1" do
     test "strips the bytes from an under_threshold refusal and passes atoms and nil through" do
       assert Policy.reason({:under_threshold, 10, 20}) == :under_threshold

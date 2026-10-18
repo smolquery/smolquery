@@ -81,7 +81,9 @@ defmodule Smolquery.Burst do
     max_inflight: 64,
     spill_inline_max_bytes: 4_194_304,
     spill_prefix: "burst-partials",
-    merge_fan_in: 16
+    merge_fan_in: 16,
+    merge_target_bytes: 134_217_728,
+    merge_min_bytes: 536_870_912
   ]
 
   @doc "The pool runners are leased from."
@@ -131,8 +133,9 @@ defmodule Smolquery.Burst do
   replies the coordinator holds outstanding at once, and the spill (D6):
   a runner partial over `spill_inline_max_bytes` is written to the sealed
   store under `spill_prefix` and returned as a location, not as bytes, and
-  `merge_fan_in` is how many spilled partials one runner merges at a time
-  before the coordinator takes the rest (T-685). Configured keys override
+  the tree merge deals spilled partials into merge shards of up to
+  `merge_target_bytes` and `merge_fan_in` inputs, and does not run under
+  `merge_min_bytes` of them (T-685, T-700). Configured keys override
   the defaults; `Smolquery.QueryService.Runtime` reads it at boot.
   """
   @spec policy() :: keyword()

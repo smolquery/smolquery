@@ -1085,7 +1085,8 @@ for {variable, key} <- [
       {"SMOLQUERY_BURST_TARGET_BYTES", :target_bytes},
       {"SMOLQUERY_BURST_WAIT_MS", :wait_ms},
       {"SMOLQUERY_BURST_MAX_INFLIGHT", :max_inflight},
-      {"SMOLQUERY_BURST_MERGE_FAN_IN", :merge_fan_in}
+      {"SMOLQUERY_BURST_MERGE_FAN_IN", :merge_fan_in},
+      {"SMOLQUERY_BURST_MERGE_TARGET_BYTES", :merge_target_bytes}
     ],
     value = System.get_env(variable) do
   config :smolquery, Smolquery.Burst, [
@@ -1096,7 +1097,8 @@ end
 for {variable, key} <- [
       {"SMOLQUERY_BURST_MIN_SCAN_BYTES", :min_scan_bytes},
       {"SMOLQUERY_BURST_RETRY_FLOOR_MS", :retry_floor_ms},
-      {"SMOLQUERY_BURST_SPILL_INLINE_MAX_BYTES", :spill_inline_max_bytes}
+      {"SMOLQUERY_BURST_SPILL_INLINE_MAX_BYTES", :spill_inline_max_bytes},
+      {"SMOLQUERY_BURST_MERGE_MIN_BYTES", :merge_min_bytes}
     ],
     value = System.get_env(variable) do
   config :smolquery, Smolquery.Burst, [

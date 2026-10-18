@@ -66,15 +66,18 @@ defmodule Smolquery.QueryService.Scatter do
   7. Partials that spilled to the store merge in a tree before the final
      (T-685, PL-77 D6). The coordinator's merge over a hundred runners'
      group tables was the floor of every high-cardinality shape on the 92 GB
-     bench (T-683): 2 to 3 GB of partials through one engine. So while more
-     than `burst.merge_fan_in` partials sit in the store, the coordinator
-     deals them in groups of that many to runners, each of which runs the
+     bench (T-683): 2 to 3 GB of partials through one engine. So the
+     coordinator deals the spilled partials into merge shards the way
+     `Smolquery.Burst.Policy.merge_groups/2` sizes them, by bytes under a
+     fan-in cap (T-700), and sends each to a runner, which runs the
      decomposition's re-partial (`Decomposer.repartial_sql/2`) over its
      group and answers one partial of the same shape, spilled or inline as
-     any shard's. The next level merges what came back with the inline
-     partials, until few enough remain for the final; the inputs every
-     level consumed are deleted with the job's other spills after the
-     final, off the merge's critical path. A merge shard is a `shard` span
+     any shard's. A level runs only while there is enough spilled to be
+     worth a lease and the level before it halved the bytes
+     (`Policy.merge_shrank?/2`); what is left merges with the inline
+     partials in the final. The inputs every level consumed are deleted
+     with the job's other spills after the final, off the merge's
+     critical path. A merge shard is a `shard` span
      with `merge_level` and `inputs`, and the levels sit under one
      `tree_merge` span. A merge shard is not retried on a peer, since a
      peer's request has no spill and its partial would come back inline:
@@ -562,54 +565,53 @@ defmodule Smolquery.QueryService.Scatter do
   defp fan_in(%{runner_base: nil}, _dir, partials), do: {partials, []}
 
   defp fan_in(context, dir, partials) do
-    {spilled, _inline} = Enum.split_with(partials, &is_binary(&1.spilled))
+    case merge_groups(partials, context) do
+      [] ->
+        {partials, []}
 
-    if under_fan_in?(spilled, context) do
-      {partials, []}
-    else
-      {inputs, stats} =
-        Trace.span(:tree_merge, &tree_meta/1, fn ->
-          levels(context, dir, partials, %{
-            level: 1,
-            shards: 0,
-            consumed: [],
-            next_index: 1 + Enum.max(for {%{index: index}, _files} <- context.shards, do: index)
-          })
-        end)
+      groups ->
+        {inputs, stats} =
+          Trace.span(:tree_merge, &tree_meta/1, fn ->
+            levels(context, dir, partials, groups, %{
+              level: 1,
+              shards: 0,
+              consumed: [],
+              spilled_bytes: spilled_bytes(partials),
+              next_index: 1 + Enum.max(for {%{index: index}, _files} <- context.shards, do: index)
+            })
+          end)
 
-      {inputs, stats.consumed}
+        {inputs, stats.consumed}
     end
   end
 
-  defp under_fan_in?(spilled, %{runtime: %Runtime{burst: %{merge_fan_in: fan_in}}}),
-    do: fan_in < 2 or length(spilled) <= fan_in
+  defp merge_groups(partials, %{runtime: %Runtime{burst: burst}}),
+    do: partials |> Enum.filter(&spilled?/1) |> Policy.merge_groups(burst)
 
-  defp levels(context, dir, partials, stats) do
-    {spilled, kept} = Enum.split_with(partials, &is_binary(&1.spilled))
+  defp spilled?(%{spilled: key}), do: is_binary(key)
 
-    if under_fan_in?(spilled, context),
-      do: {partials, settled(stats, :ok)},
-      else: descend(context, dir, {spilled, kept}, merge_targets(spilled, context, stats), stats)
+  defp spilled_bytes(partials),
+    do: partials |> Enum.filter(&spilled?/1) |> Enum.sum_by(& &1.bytes)
+
+  defp levels(context, dir, partials, groups, stats) do
+    grouped = List.flatten(groups)
+    kept = partials -- grouped
+    descend(context, dir, {grouped, kept}, merge_targets(groups, context, stats), stats)
   end
 
-  defp merge_targets(
-         spilled,
-         %{runtime: %Runtime{burst: %{merge_fan_in: fan_in, pool: pool}}},
-         stats
-       ) do
-    spilled
-    |> Enum.chunk_every(fan_in)
-    |> Enum.with_index(fn group, offset ->
+  defp merge_targets(groups, %{runtime: %Runtime{burst: %{pool: pool}}}, stats) do
+    Enum.with_index(groups, fn group, offset ->
       merge = %{level: stats.level, locations: Enum.map(group, & &1.path)}
       {%{kind: :runner, pool: pool, index: stats.next_index + offset, merge: merge}, []}
     end)
   end
 
-  defp descend(%{runtime: runtime} = context, dir, {spilled, kept}, targets, stats) do
+  defp descend(%{runtime: runtime} = context, dir, {grouped, kept}, targets, stats) do
     case level(context, dir, targets) do
       {:ok, merged} ->
-        consumed = Enum.map(spilled, & &1.spilled)
-        levels(context, dir, kept ++ merged, advanced(stats, length(targets), consumed))
+        stats = advanced(stats, length(targets), Enum.map(grouped, & &1.spilled))
+        bytes = {Enum.sum_by(grouped, & &1.bytes), Enum.sum_by(merged, & &1.bytes)}
+        next_level(context, dir, kept ++ merged, bytes, stats)
 
       {:error, reason} ->
         Logger.warning(
@@ -621,18 +623,33 @@ defmodule Smolquery.QueryService.Scatter do
           for({target, _files} <- targets, do: spill_key(runtime, context.job_id, target.index))
         )
 
-        {kept ++ spilled, settled(stats, :error)}
+        {kept ++ grouped, settled(stats, :error, kept ++ grouped)}
     end
   end
 
-  defp settled(stats, outcome), do: Map.merge(stats, %{outcome: outcome, levels: stats.level - 1})
+  defp next_level(context, dir, partials, {bytes_in, bytes_out}, stats) do
+    groups = merge_groups(partials, context)
+
+    if groups != [] and Policy.merge_shrank?(bytes_in, bytes_out),
+      do: levels(context, dir, partials, groups, stats),
+      else: {partials, settled(stats, :ok, partials)}
+  end
+
+  defp settled(stats, outcome, partials) do
+    Map.merge(stats, %{
+      outcome: outcome,
+      levels: stats.level - 1,
+      left_bytes: spilled_bytes(partials)
+    })
+  end
 
   defp advanced(stats, shards, consumed) do
     %{
-      level: stats.level + 1,
-      shards: stats.shards + shards,
-      consumed: stats.consumed ++ consumed,
-      next_index: stats.next_index + shards
+      stats
+      | level: stats.level + 1,
+        shards: stats.shards + shards,
+        consumed: stats.consumed ++ consumed,
+        next_index: stats.next_index + shards
     }
   end
 
@@ -646,8 +663,16 @@ defmodule Smolquery.QueryService.Scatter do
     |> collect(context, dir)
   end
 
-  defp tree_meta({_inputs, %{outcome: outcome, levels: levels, shards: shards, consumed: keys}}),
-    do: %{outcome: outcome, levels: levels, shards: shards, consumed: length(keys)}
+  defp tree_meta({_inputs, %{outcome: outcome, levels: levels, shards: shards} = stats}) do
+    %{
+      outcome: outcome,
+      levels: levels,
+      shards: shards,
+      consumed: length(stats.consumed),
+      spilled_bytes: stats.spilled_bytes,
+      left_bytes: stats.left_bytes
+    }
+  end
 
   defp tree_meta(raised), do: %{outcome: :error, error: error_text(raised)}
 

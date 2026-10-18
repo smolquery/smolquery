@@ -24,6 +24,21 @@ defmodule Smolquery.Burst.Policy do
   did not ask. Nor is `:auto` on a node without a pool, since `:auto` is
   every job's default; an integer on such a node is `:no_pool`, because the
   caller asked for something the deployment cannot give.
+
+  ## The tree merge
+
+  The policy also deals spilled runner partials into merge shards
+  (`merge_groups/2`, T-685, T-700). A merge shard on a 10 GB Lambda
+  re-aggregates partials at about 65 MB/s, a fifth of the coordinator's
+  rate, and its time is linear in its bytes, so a shard is sized like a
+  scan shard: partials in landing order up to `merge_target_bytes` (128
+  MiB, about 2 s), at least two and at most `merge_fan_in`. A shard of
+  sixteen 85 MB partials ran 15 to 21 s on the 92 GB bench and lost more
+  than the coordinator's merge it replaced. The tree does not run at all
+  under `merge_min_bytes` of spilled partials, where the coordinator's
+  own merge is cheaper than a lease, and a level runs only after the
+  level before it halved the spilled bytes (`merge_shrank?/2`): a merge
+  that finds few shared keys has nothing for the next level to save.
   """
 
   @type request :: false | :auto | non_neg_integer()
@@ -38,6 +53,15 @@ defmodule Smolquery.Burst.Policy do
         }
 
   @type refusal :: :off | :no_pool | {:under_threshold, non_neg_integer(), non_neg_integer()}
+
+  @type merge_config :: %{
+          required(:merge_fan_in) => pos_integer(),
+          required(:merge_target_bytes) => pos_integer(),
+          required(:merge_min_bytes) => non_neg_integer(),
+          optional(atom()) => term()
+        }
+
+  @type partial :: %{required(:bytes) => non_neg_integer(), optional(atom()) => term()}
 
   @doc """
   How many runners a job that asked `request` over `scan_bytes` of sealed
@@ -78,6 +102,49 @@ defmodule Smolquery.Burst.Policy do
   def reason(nil), do: nil
   def reason({reason, _scan_bytes, _threshold}), do: reason
   def reason(reason) when is_atom(reason), do: reason
+
+  @doc """
+  The merge shards one tree level deals `spilled` partials into under
+  `config`, each a list of at least two partials in the order given, or
+  none: when `merge_fan_in` is under 2 (the tree is off), when the
+  partials together are under `merge_min_bytes`, or when no two of them
+  fit a shard. A shard takes partials while it holds fewer than
+  `merge_fan_in` and the next one keeps it within `merge_target_bytes`;
+  the second partial always joins, so two partials each over the target
+  still merge. A partial left alone at the end stays with the coordinator.
+  """
+  @spec merge_groups([partial()], merge_config()) :: [[partial()]]
+  def merge_groups(_spilled, %{merge_fan_in: fan_in}) when fan_in < 2, do: []
+
+  def merge_groups(spilled, %{merge_min_bytes: floor} = config) do
+    if Enum.sum_by(spilled, & &1.bytes) < floor, do: [], else: groups(spilled, config)
+  end
+
+  @doc """
+  Whether a level that merged `bytes_in` of partials into `bytes_out` earns
+  the level after it: it did when it at least halved them. A level costs a
+  lease and about 2 s of merge however little it saves, and the coordinator
+  merges what is left at 200 to 400 MB/s, so a level that cut 2 GB by less
+  than half saved under 3 s and the next would save less again.
+  """
+  @spec merge_shrank?(non_neg_integer(), non_neg_integer()) :: boolean()
+  def merge_shrank?(bytes_in, bytes_out), do: bytes_out * 2 <= bytes_in
+
+  defp groups(spilled, %{merge_fan_in: fan_in, merge_target_bytes: target}) do
+    spilled
+    |> Enum.reduce([], fn partial, groups -> place(partial, groups, fan_in, target) end)
+    |> Enum.reverse()
+    |> Enum.flat_map(fn
+      {_alone, _bytes, 1} -> []
+      {group, _bytes, _count} -> [Enum.reverse(group)]
+    end)
+  end
+
+  defp place(partial, [{group, bytes, count} | rest], fan_in, target)
+       when count < fan_in and (count < 2 or bytes + partial.bytes <= target),
+       do: [{[partial | group], bytes + partial.bytes, count + 1} | rest]
+
+  defp place(partial, groups, _fan_in, _target), do: [{[partial], partial.bytes, 1} | groups]
 
   defp cap(count, %{max_per_job: per_job, max: max}),
     do: count |> min(per_job) |> min(max) |> max(1)
