@@ -565,14 +565,14 @@ defmodule Smolquery.QueryService.Scatter do
   defp fan_in(%{runner_base: nil}, _dir, partials), do: {partials, []}
 
   defp fan_in(context, dir, partials) do
-    case merge_groups(partials, context) do
-      [] ->
+    case merge_deal(partials, context) do
+      {[], _kept} ->
         {partials, []}
 
-      groups ->
+      {groups, kept} ->
         {inputs, stats} =
           Trace.span(:tree_merge, &tree_meta/1, fn ->
-            levels(context, dir, partials, groups, %{
+            levels(context, dir, {groups, kept}, %{
               level: 1,
               shards: 0,
               consumed: [],
@@ -585,17 +585,19 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp merge_groups(partials, %{runtime: %Runtime{burst: burst}}),
-    do: partials |> Enum.filter(&spilled?/1) |> Policy.merge_groups(burst)
+  defp merge_deal(partials, %{runtime: %Runtime{burst: burst}}) do
+    {spilled, inline} = Enum.split_with(partials, &spilled?/1)
+    {groups, left} = Policy.merge_groups(spilled, burst)
+    {groups, inline ++ left}
+  end
 
   defp spilled?(%{spilled: key}), do: is_binary(key)
 
   defp spilled_bytes(partials),
     do: partials |> Enum.filter(&spilled?/1) |> Enum.sum_by(& &1.bytes)
 
-  defp levels(context, dir, partials, groups, stats) do
+  defp levels(context, dir, {groups, kept}, stats) do
     grouped = List.flatten(groups)
-    kept = partials -- grouped
     descend(context, dir, {grouped, kept}, merge_targets(groups, context, stats), stats)
   end
 
@@ -628,11 +630,12 @@ defmodule Smolquery.QueryService.Scatter do
   end
 
   defp next_level(context, dir, partials, {bytes_in, bytes_out}, stats) do
-    groups = merge_groups(partials, context)
-
-    if groups != [] and Policy.merge_shrank?(bytes_in, bytes_out),
-      do: levels(context, dir, partials, groups, stats),
-      else: {partials, settled(stats, :ok, partials)}
+    with true <- Policy.merge_shrank?(bytes_in, bytes_out),
+         {[_ | _] = groups, kept} <- merge_deal(partials, context) do
+      levels(context, dir, {groups, kept}, stats)
+    else
+      _no_level -> {partials, settled(stats, :ok, partials)}
+    end
   end
 
   defp settled(stats, outcome, partials) do

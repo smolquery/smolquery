@@ -67,46 +67,52 @@ defmodule Smolquery.Burst.PolicyTest do
     test "fills a shard up to merge_target_bytes in landing order" do
       spilled = partials(List.duplicate(25 * @mib, 12))
 
-      assert [first, second, third] = Policy.merge_groups(spilled, @merge)
+      assert {[first, second, third], []} = Policy.merge_groups(spilled, @merge)
       assert Enum.map(first, & &1.index) == [0, 1, 2, 3, 4]
       assert Enum.map(second, & &1.index) == [5, 6, 7, 8, 9]
       assert Enum.map(third, & &1.index) == [10, 11]
     end
 
     test "merge_fan_in caps a shard's inputs however small they are" do
-      assert @merge
-             |> Map.put(:merge_fan_in, 3)
-             |> then(&Policy.merge_groups(partials(List.duplicate(@mib, 7)), &1))
-             |> Enum.map(&length/1) == [3, 3]
+      {groups, [%{index: 6}]} =
+        Policy.merge_groups(partials(List.duplicate(@mib, 7)), %{@merge | merge_fan_in: 3})
+
+      assert Enum.map(groups, &length/1) == [3, 3]
     end
 
-    test "two partials always share a shard, even over the target, and a last one alone stays put" do
-      sizes = [85 * @mib, 85 * @mib, 85 * @mib, 85 * @mib, 85 * @mib]
+    test "a partial that fits a shard with no other is left to the coordinator" do
+      spilled = partials(List.duplicate(85 * @mib, 5))
+      assert {[], ^spilled} = Policy.merge_groups(spilled, @merge)
 
-      assert [[%{index: 0}, %{index: 1}], [%{index: 2}, %{index: 3}]] =
+      sizes = [60 * @mib, 60 * @mib, 300 * @mib, 60 * @mib, 60 * @mib, 60 * @mib]
+
+      assert {[[%{index: 0}, %{index: 1}], [%{index: 3}, %{index: 4}]],
+              [%{index: 2}, %{index: 5}]} =
                Policy.merge_groups(partials(sizes), @merge)
+    end
 
-      assert [[_, _]] =
-               Policy.merge_groups(partials([300 * @mib, 300 * @mib, 200 * @mib]), @merge)
-
-      assert [] == Policy.merge_groups(partials([600 * @mib]), @merge)
+    test "a level needs two shards" do
+      spilled = partials(List.duplicate(25 * @mib, 6))
+      assert {[], ^spilled} = Policy.merge_groups(spilled, @merge)
+      assert {[_, _], []} = Policy.merge_groups(partials(List.duplicate(25 * @mib, 7)), @merge)
     end
 
     test "under merge_min_bytes the coordinator merges alone" do
-      sizes = List.duplicate(50 * @mib, 10)
+      spilled = partials(List.duplicate(50 * @mib, 10))
 
-      assert [] == Policy.merge_groups(partials(sizes), %{@merge | merge_min_bytes: 512 * @mib})
+      assert {[], ^spilled} =
+               Policy.merge_groups(spilled, %{@merge | merge_min_bytes: 512 * @mib})
 
-      assert [_, _, _, _, _] =
-               Policy.merge_groups(partials(sizes), %{@merge | merge_min_bytes: 500 * @mib})
+      assert {[_, _, _, _, _], []} =
+               Policy.merge_groups(spilled, %{@merge | merge_min_bytes: 500 * @mib})
 
-      assert [] == Policy.merge_groups([], @merge)
+      assert {[], []} = Policy.merge_groups([], @merge)
     end
 
     test "a fan-in under 2 turns the tree off" do
-      sizes = List.duplicate(50 * @mib, 100)
+      spilled = partials(List.duplicate(50 * @mib, 100))
 
-      assert [] == Policy.merge_groups(partials(sizes), %{@merge | merge_fan_in: 1})
+      assert {[], ^spilled} = Policy.merge_groups(spilled, %{@merge | merge_fan_in: 1})
     end
   end
 

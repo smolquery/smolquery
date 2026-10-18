@@ -711,7 +711,11 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
          merge_min_bytes: 0
        ]
   test "spilled partials merge in a tree on runners before the final, and leave nothing behind (T-685, T-700)",
-       %{control: control, distributed: distributed, tmp_dir: tmp_dir} do
+       %{control: control, distributed: distributed, tmp_dir: tmp_dir, catalog: catalog} do
+    seventh = for i <- 16..17, do: %{"id" => i, "name" => "g-#{rem(i, 3)}"}
+    {:ok, segment} = SegmentFixture.write(seventh, schema(), store: seed_store(tmp_dir))
+    {:ok, _snapshot} = Catalog.register_segments(catalog, @table, [segment])
+
     sql =
       "SELECT name, count(*) AS c, sum(id) AS s FROM analytics.events GROUP BY name ORDER BY name"
 
@@ -720,23 +724,20 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert {:ok, %{state: :done} = job, _frame} =
              Client.query(distributed, sql, burst: 4, trace: true)
 
-    assert %{peers: 3, burst: burst} = job.scatter
-    assert burst >= 3
+    assert %{peers: 3, burst: 4} = job.scatter
 
     assert [tree] = Enum.filter(job.trace, &(&1.name == :tree_merge))
-    assert %{outcome: :ok, levels: levels, shards: merge_shards} = tree.meta
-    assert levels in [1, 2]
-    assert merge_shards == div(burst, 2) + levels - 1
+    assert %{outcome: :ok, levels: 1, shards: 2} = tree.meta
     assert tree.meta.spilled_bytes > tree.meta.left_bytes and tree.meta.left_bytes > 0
 
     merges = Enum.filter(job.trace, &(&1.name == :shard and Map.has_key?(&1.meta, :merge_level)))
-    assert length(merges) == merge_shards
+    assert [_, _] = merges
 
     for merge <- merges do
-      assert %{kind: :runner, merge_level: level, files: 0, engine: :standalone, rows: rows} =
+      assert %{kind: :runner, merge_level: 1, files: 0, engine: :standalone, rows: rows} =
                merge.meta
 
-      assert level in 1..levels and merge.meta.inputs == 2 and rows > 0
+      assert merge.meta.inputs == 2 and rows > 0
     end
 
     assert {:ok, []} = Store.list(seed_store(tmp_dir), "burst-partials")

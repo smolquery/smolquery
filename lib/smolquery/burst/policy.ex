@@ -32,13 +32,16 @@ defmodule Smolquery.Burst.Policy do
   re-aggregates partials at about 65 MB/s, a fifth of the coordinator's
   rate, and its time is linear in its bytes, so a shard is sized like a
   scan shard: partials in landing order up to `merge_target_bytes` (128
-  MiB, about 2 s), at least two and at most `merge_fan_in`. A shard of
-  sixteen 85 MB partials ran 15 to 21 s on the 92 GB bench and lost more
-  than the coordinator's merge it replaced. The tree does not run at all
-  under `merge_min_bytes` of spilled partials, where the coordinator's
-  own merge is cheaper than a lease, and a level runs only after the
-  level before it halved the spilled bytes (`merge_shrank?/2`): a merge
-  that finds few shared keys has nothing for the next level to save.
+  MiB, about 2 s) and at most `merge_fan_in` of them. A shard of sixteen
+  85 MB partials ran 15 to 21 s on the 92 GB bench and lost more than the
+  coordinator's merge it replaced, so a partial that fits a shard with no
+  other stays with the coordinator, whose merge of two large partials
+  beats a lease. A level needs two shards: one shard moves the whole
+  merge onto a runner at a fifth of the coordinator's rate and saves
+  nothing. The tree does not run at all under `merge_min_bytes` of
+  spilled partials, and a level runs only after the level before it
+  halved the spilled bytes (`merge_shrank?/2`): a merge that finds few
+  shared keys has nothing for the next level to save.
   """
 
   @type request :: false | :auto | non_neg_integer()
@@ -105,19 +108,19 @@ defmodule Smolquery.Burst.Policy do
 
   @doc """
   The merge shards one tree level deals `spilled` partials into under
-  `config`, each a list of at least two partials in the order given, or
-  none: when `merge_fan_in` is under 2 (the tree is off), when the
-  partials together are under `merge_min_bytes`, or when no two of them
-  fit a shard. A shard takes partials while it holds fewer than
-  `merge_fan_in` and the next one keeps it within `merge_target_bytes`;
-  the second partial always joins, so two partials each over the target
-  still merge. A partial left alone at the end stays with the coordinator.
+  `config`, and the partials it leaves to the coordinator. Each shard is
+  a list of at least two partials in the order given; a shard takes
+  partials while it holds fewer than `merge_fan_in` and the next one
+  keeps it within `merge_target_bytes`, so a partial that fits with no
+  other is left. No level forms, and every partial is left, when
+  `merge_fan_in` is under 2 (the tree is off), when the partials together
+  are under `merge_min_bytes`, or when fewer than two shards form.
   """
-  @spec merge_groups([partial()], merge_config()) :: [[partial()]]
-  def merge_groups(_spilled, %{merge_fan_in: fan_in}) when fan_in < 2, do: []
+  @spec merge_groups([partial()], merge_config()) :: {[[partial()]], [partial()]}
+  def merge_groups(spilled, %{merge_fan_in: fan_in}) when fan_in < 2, do: {[], spilled}
 
   def merge_groups(spilled, %{merge_min_bytes: floor} = config) do
-    if Enum.sum_by(spilled, & &1.bytes) < floor, do: [], else: groups(spilled, config)
+    if Enum.sum_by(spilled, & &1.bytes) < floor, do: {[], spilled}, else: deal(spilled, config)
   end
 
   @doc """
@@ -130,18 +133,23 @@ defmodule Smolquery.Burst.Policy do
   @spec merge_shrank?(non_neg_integer(), non_neg_integer()) :: boolean()
   def merge_shrank?(bytes_in, bytes_out), do: bytes_out * 2 <= bytes_in
 
-  defp groups(spilled, %{merge_fan_in: fan_in, merge_target_bytes: target}) do
-    spilled
-    |> Enum.reduce([], fn partial, groups -> place(partial, groups, fan_in, target) end)
-    |> Enum.reverse()
-    |> Enum.flat_map(fn
-      {_alone, _bytes, 1} -> []
-      {group, _bytes, _count} -> [Enum.reverse(group)]
-    end)
+  defp deal(spilled, %{merge_fan_in: fan_in, merge_target_bytes: target}) do
+    {shards, alone} =
+      spilled
+      |> Enum.reduce([], fn partial, groups -> place(partial, groups, fan_in, target) end)
+      |> Enum.reverse()
+      |> Enum.split_with(fn {_group, _bytes, count} -> count >= 2 end)
+
+    case shards do
+      [_, _ | _] -> {Enum.map(shards, &members/1), Enum.map(alone, &List.first(members(&1)))}
+      _one_or_none -> {[], spilled}
+    end
   end
 
+  defp members({group, _bytes, _count}), do: Enum.reverse(group)
+
   defp place(partial, [{group, bytes, count} | rest], fan_in, target)
-       when count < fan_in and (count < 2 or bytes + partial.bytes <= target),
+       when count < fan_in and bytes + partial.bytes <= target,
        do: [{[partial | group], bytes + partial.bytes, count + 1} | rest]
 
   defp place(partial, groups, _fan_in, _target), do: [{[partial], partial.bytes, 1} | groups]
