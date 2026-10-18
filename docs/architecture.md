@@ -1137,13 +1137,13 @@ Properties worth knowing:
   a peer or a burst runner (T-690). Readable is exactly the runtime's
   `allowed_directories` (the data dir and catalog paths by default) plus the
   plan's own micro-segment URLs; a shard engine adds only its own fresh
-  output directory, which is where its partial is written. The
-  configuration is locked, so SQL cannot turn it back on. The only options left settable are the ones DuckLake sets on its
-  metadata connection at every transaction (`allowed_configs`,
-  `Smolquery.QueryService.Lockdown`); DuckDB 2.0 refuses them under the lock
-  otherwise. `lockdown: false` restores the trusted posture, and drops both gates
-  together. A deployment whose sealed segments live outside the data dir names
-  them in `allowed_directories`.
+  output directory, which is where its partial is written. The configuration
+  is locked, so SQL cannot turn it back on. The only options left settable
+  are the ones DuckLake sets on its metadata connection at every transaction
+  (`allowed_configs`, `Smolquery.QueryService.Lockdown`); DuckDB 2.0 refuses
+  them under the lock otherwise. `lockdown: false` restores the trusted
+  posture, and drops both gates together. A deployment whose sealed segments
+  live outside the data dir names them in `allowed_directories`.
 
   The parser gate is not redundant with the engine's (T-321). `refs/1`
   collects `BASE_TABLE` nodes, and a table function is not one, so table

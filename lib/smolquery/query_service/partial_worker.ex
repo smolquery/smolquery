@@ -90,10 +90,15 @@ defmodule Smolquery.QueryService.PartialWorker do
   DuckLake's exempted options before the lock. The `COPY ... TO` that
   writes the partial lands in the output directory, which is allowed, so
   it needs no open access (T-690). The output directory is one fresh
-  directory per shard under the system temporary directory, not that
-  directory itself: on a runner the host's temporary directory also holds
-  what the bootstrap wrote, and the shard may read none of it. A shard
-  honors the runtime's `lockdown` flag the same way `Runner` does.
+  directory per shard, named by this OS process and a counter, under the
+  node's spill root (`:spill_dir`, `SMOLQUERY_SPILL_DIR`, the same root the
+  coordinator's partials use) or else the system temporary directory. Only
+  that directory is allowed, never its root: on a runner the host's
+  temporary directory also holds what the bootstrap wrote, and the shard
+  may read none of it. The shard makes the directory itself and fails
+  rather than adopt one that already exists, so a leftover from a crash is
+  never readable; the directory goes with the engine. A shard honors the
+  runtime's `lockdown` flag the same way `Runner` does.
 
   ## The spill (PL-77 D6)
 
@@ -335,9 +340,7 @@ defmodule Smolquery.QueryService.PartialWorker do
   defp execute(engine, request, decision, plan, {source, engine_us}) do
     started = System.monotonic_time(:microsecond)
 
-    directory =
-      Path.join(System.tmp_dir!(), "smolquery-partial-#{System.unique_integer([:positive])}")
-
+    directory = output_directory_path()
     path = Path.join(directory, "partial.parquet")
 
     try do
@@ -349,7 +352,7 @@ defmodule Smolquery.QueryService.PartialWorker do
            :ok <-
              apply_statements(
                engine.connection,
-               view(request, files) ++ plan.lockdown.(path, request.allowed_paths)
+               view(request, files) ++ plan.lockdown.(directory, request.allowed_paths)
              ),
            {scan_us, {:ok, rows}} <-
              Telemetry.timed(fn ->
@@ -391,8 +394,17 @@ defmodule Smolquery.QueryService.PartialWorker do
     end
   end
 
+  defp output_directory_path do
+    Path.join(
+      Application.get_env(:smolquery, :spill_dir) || System.tmp_dir!(),
+      "smolquery-partial-#{System.pid()}-#{System.unique_integer([:positive])}"
+    )
+  end
+
   defp output_directory(directory) do
-    case File.mkdir_p(directory) do
+    File.mkdir_p(Path.dirname(directory))
+
+    case File.mkdir(directory) do
       :ok -> :ok
       {:error, posix} -> {:error, {:output_directory_failed, directory, posix}}
     end
@@ -484,11 +496,11 @@ defmodule Smolquery.QueryService.PartialWorker do
     end)
   end
 
-  defp lockdown(false, _allowed_directories, _store, _path, _allowed_paths), do: []
+  defp lockdown(false, _allowed_directories, _store, _output_directory, _allowed_paths), do: []
 
-  defp lockdown(true, allowed_directories, store, path, allowed_paths) do
+  defp lockdown(true, allowed_directories, store, output_directory, allowed_paths) do
     directories =
-      [Path.dirname(path) | allowed_directories] ++ EngineSecrets.sealed_prefixes(store)
+      [output_directory | allowed_directories] ++ EngineSecrets.sealed_prefixes(store)
 
     Lockdown.statements(directories, allowed_paths)
   end

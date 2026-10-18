@@ -14,6 +14,15 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
   @table {"analytics", "events"}
 
   setup %{tmp_dir: tmp_dir} do
+    spill_dir = Application.get_env(:smolquery, :spill_dir)
+    Application.put_env(:smolquery, :spill_dir, tmp_dir)
+
+    on_exit(fn ->
+      if spill_dir,
+        do: Application.put_env(:smolquery, :spill_dir, spill_dir),
+        else: Application.delete_env(:smolquery, :spill_dir)
+    end)
+
     store = Store.Local.new(dir: tmp_dir)
     schema = Schema.new!([{"id", :int64}])
 
@@ -130,7 +139,7 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       request = %{request | partial_sql: "SELECT count(*) AS s FROM read_parquet('#{outside}')"}
 
       assert {:error, reason} = PartialWorker.run_standalone(request)
-      assert inspect(reason) =~ "Cannot access file"
+      assert inspect(reason) =~ ~r/Permission Error|disabled by configuration/
     end
 
     test "without lockdown the shard keeps the trusted posture and reads the same file",
@@ -147,13 +156,14 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       assert DataFrame.to_columns(DataFrame.load_parquet!(parquet))["s"] == [3]
     end
 
-    test "the shard's output directory does not outlive it", %{request: request} do
-      before = output_directories()
+    test "the shard's output directory lives under the spill root and not past the shard",
+         %{request: request, tmp_dir: tmp_dir} do
+      assert output_directories(tmp_dir) == []
 
       assert {:ok, _reply} = PartialWorker.run_standalone(request)
       assert {:error, _reason} = PartialWorker.run_standalone(%{request | partial_sql: "SELECT"})
 
-      assert output_directories() == before
+      assert output_directories(tmp_dir) == []
     end
 
     defp parquet_in_the_hosts_tmp do
@@ -168,8 +178,7 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       path
     end
 
-    defp output_directories,
-      do: System.tmp_dir!() |> Path.join("smolquery-partial-*") |> Path.wildcard() |> Enum.sort()
+    defp output_directories(root), do: root |> Path.join("smolquery-partial-*") |> Path.wildcard()
   end
 
   describe "standalone_options/1" do
