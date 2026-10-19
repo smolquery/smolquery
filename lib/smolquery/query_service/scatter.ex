@@ -883,13 +883,16 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp retry_target(%{kind: kind} = target, %{peers: peers} = context)
-       when kind == :runner or is_map_key(target, :merge) do
-    others = Enum.reject(peers, &(&1.node == Map.get(target, :node)))
-    retry_host(target, if(others == [], do: peers, else: others), context)
-  end
-
+  defp retry_target(%{kind: :runner} = target, context), do: other_peer(target, context)
+  defp retry_target(%{merge: _level} = target, context), do: other_peer(target, context)
   defp retry_target(_scan_on_a_peer, _context), do: nil
+
+  defp other_peer(target, %{peers: peers} = context) do
+    case Enum.reject(peers, &(&1.node == Map.get(target, :node))) do
+      [] -> retry_host(target, peers, context)
+      others -> retry_host(target, others, context)
+    end
+  end
 
   defp retry_host(_target, [], _context), do: nil
 
