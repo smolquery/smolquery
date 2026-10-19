@@ -220,13 +220,14 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
-### 0.27.0: a merge shard is bound by files (T-702)
+### 0.27.0: a merge shard is bound by files, and retried (T-702, T-703)
 
-**TL;DR.** A bucket merge shard is now bound by `SMOLQUERY_BURST_MERGE_MAX_FILES` (`256`) as well as by bytes, so a level over many runners runs as sixteen shards in parallel instead of three pod shards reading hundreds of files each. Nothing to change; the sandbox keeps its defaults.
+**TL;DR.** A bucket merge shard is now bound by `SMOLQUERY_BURST_MERGE_MAX_FILES` (`256`) as well as by bytes, so a level over many runners runs as sixteen shards in parallel instead of three pod shards reading hundreds of files each. A merge shard that fails is retried on a peer, and a level that still loses a shard hands the coordinator only that shard's inputs. Nothing to change; the sandbox keeps its defaults.
 
 - **Why.** On the 0.26.0 bench (T-701) the bucket level grew with the runner count while the scan shrank: 3 to 4 s at 25 and 50 runners, 6 s at 100, 9 to 11 s at 250, so highcard and search stopped improving past 100 runners. A traced query at 250 runners showed three pod shards taking every bucket, the slowest reading 800 files for 152 MB in 7.6 s: about 8 ms a file, bytes beside the point.
 - **`SMOLQUERY_BURST_MERGE_MAX_FILES` (`256`)** bounds a shard's input files the way `SMOLQUERY_BURST_MERGE_TARGET_BYTES` bounds its bytes: buckets pack under it, one over it alone, and a pod taking its `SMOLQUERY_BURST_MERGE_PEER_WEIGHT` share passes over a group that would take its shard past it; the groups no pod took go to runners. Past about 250 runners every bucket is its own shard. A whole spilled partial counts as one file, so the by-count tree is unchanged at the default fan-in and peer weight (16 times 4 is under 256).
 - **The bucket count stays `SMOLQUERY_BURST_MERGE_PARTITIONS`** at every runner count: a bucket is a file per runner however many buckets there are, so fewer buckets would only narrow the level, and a runner already splits a small partial into fewer of them.
+- **A merge shard that fails is retried once on a peer (T-703)**, another peer than the one it failed on, under the same `SMOLQUERY_BURST_RETRY_FLOOR_MS`. On the 0.26.0 bench one regex job took 108 s after a single merge shard's spill upload failed: the level fell back to the coordinator, which read the 5,500 bucket files itself. Now a level waits for every shard, keeps the ones that answered, and a shard that failed twice leaves only its own inputs to the final; the `tree_merge` span says `partial` and counts `failed_shards`. No merge shard is killed mid-upload any more, so a failed level leaves no stragglers behind the sweep.
 
 ### 0.26.0: the merge moves to the peers and to key buckets (T-700, T-701)
 
