@@ -270,6 +270,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Pruner
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.QueryService.ScanColumns
   alias Smolquery.QueryService.Statistics
   alias Smolquery.QueryService.TopN
   alias Smolquery.QueryService.Trace
@@ -303,6 +304,7 @@ defmodule Smolquery.QueryService.Planner do
          {:ok, snapshot} <-
            Trace.span(:snapshot, fn -> pinned_snapshot(runtime, Keyword.get(pin, :snapshot)) end),
          {:ok, tables} <- Trace.span(:resolve, fn -> resolve(runtime, refs, snapshot) end),
+         tables = Trace.span(:columns, fn -> scanned(runtime, statement, snapshot, tables) end),
          :ok <- fresh_pin(runtime, Keyword.get(pin, :hot_before_ms)),
          folded =
            Trace.span(:fold, fn ->
@@ -681,6 +683,46 @@ defmodule Smolquery.QueryService.Planner do
     end)
   end
 
+  # The sealed tier's bytes are the referenced columns' (T-704): the ids of
+  # the names `ScanColumns` finds, summed by the catalog over the live files;
+  # a star reads whole files, a bare count reads none, and a catalog
+  # without per-column sizes falls back to the whole files.
+  defp scanned(runtime, statement, snapshot, tables) do
+    schemas = Map.new(tables, fn {ref, %{schema: schema}} -> {ref, schema} end)
+    referenced = ScanColumns.referenced(statement, schemas)
+
+    Map.new(tables, fn {ref, table} ->
+      {ref, Map.put(table, :stats, scan_bytes(runtime, ref, snapshot, table, referenced[ref]))}
+    end)
+  end
+
+  defp scan_bytes(_runtime, _ref, _snapshot, %{stats: :unavailable}, _columns), do: :unavailable
+
+  defp scan_bytes(_runtime, _ref, _snapshot, %{stats: stats}, :all),
+    do: Map.put(stats, :scan_bytes, stats.bytes)
+
+  defp scan_bytes(_runtime, _ref, _snapshot, %{stats: stats}, []),
+    do: Map.put(stats, :scan_bytes, 0)
+
+  defp scan_bytes(runtime, ref, snapshot, %{stats: stats, schema: schema}, names) do
+    ids =
+      for name <- names,
+          {:ok, %Smolquery.Schema.Field{id: id}} <- [Smolquery.Schema.field(schema, name)],
+          id,
+          do: id
+
+    case Catalog.file_column_stats(runtime.catalog, ref, snapshot, ids) do
+      {:ok, files} -> Map.put(stats, :scan_bytes, column_bytes(files, ids))
+      {:error, _unsupported_or_failed} -> Map.put(stats, :scan_bytes, stats.bytes)
+    end
+  end
+
+  defp column_bytes(files, ids) do
+    Enum.sum_by(files, fn %{columns: columns} ->
+      Enum.sum_by(ids, &(get_in(columns, [&1, :bytes]) || 0))
+    end)
+  end
+
   # A table with a materialized column reads the registration snapshot of
   # each sealed file, so the view can tell which files predate the column
   # and read it as its expression there (`Views.recomputed/2`); a table
@@ -943,6 +985,7 @@ defmodule Smolquery.QueryService.Planner do
           sealed_files,
           sealed_files,
           Enum.sum_by(sealed, & &1.rows),
+          Enum.sum_by(sealed, & &1.scan_bytes),
           Enum.sum_by(sealed, & &1.bytes)
         )
 

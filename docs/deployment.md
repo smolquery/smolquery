@@ -220,6 +220,15 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### Next release: bytes scanned count the columns a query reads (T-704)
+
+**TL;DR.** A job's `statistics.bytesScanned`, and the query page's "scanned N MiB", now count the bytes of the columns the query references, not the whole files: `SELECT count(*)` over the 92 GB bench table reports 0, `SELECT UserID` one column's worth, `SELECT *` the old number. The old number is still there as `fileBytes`. Anything that read `bytesScanned` as a file total should read `fileBytes` now. Nothing to configure.
+
+- **Why.** Parquet is columnar and DuckDB reads only the referenced column chunks, so the file total overstated a narrow query by up to a hundredfold on a wide table, and a BigQuery alternative has to account for what a query reads, which is what BigQuery bills as bytes processed.
+- **Where the number comes from.** DuckLake keeps `column_size_bytes` per file and column (`ducklake_file_column_stats`); the planner names the referenced columns from the statement's AST and reads their per-file stats over the live files at the pinned snapshot, one row per file and column, through the `(table_id, data_file_id)` index (T-696). One more catalog read per plan, smaller than the segment list the scatter already reads; a bare `count(*)` and a `SELECT *` read nothing extra.
+- **The hot tier stays whole.** A micro-segment is small and its buffer pod serves it whole, so there `bytesScanned` equals `fileBytes`.
+- **Not yet.** Per-shard scan bytes on the trace, and an engine-measured I/O number beside the plan-derived one, are separate tasks; the burst runner count still sizes by file bytes.
+
 ### 0.27.0: a merge shard is bound by files, and retried (T-702, T-703)
 
 **TL;DR.** A bucket merge shard is now bound by `SMOLQUERY_BURST_MERGE_MAX_FILES` (`256`) as well as by bytes, so a level over many runners runs as sixteen shards in parallel instead of three pod shards reading hundreds of files each. A merge shard that fails is retried on a peer, and a level that still loses a shard hands the coordinator only that shard's inputs. Nothing to change; the sandbox keeps its defaults.

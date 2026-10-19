@@ -220,13 +220,15 @@ A finished job carries a **`statistics`** object. It appears on the `job` in a `
 ```json
 {
   "filesTotal": 12, "filesScanned": 4,
-  "rowsScanned": 100000, "bytesScanned": 52428800, "mibScanned": 50.0,
-  "hot":    {"filesTotal": 9, "filesScanned": 1, "rowsScanned": 1000, "bytesScanned": 4096},
-  "sealed": {"filesTotal": 3, "filesScanned": 3, "rowsScanned": 99000, "bytesScanned": 52424704}
+  "rowsScanned": 100000, "bytesScanned": 6815744, "mibScanned": 6.5, "fileBytes": 52428800,
+  "hot":    {"filesTotal": 9, "filesScanned": 1, "rowsScanned": 1000, "bytesScanned": 4096, "fileBytes": 4096},
+  "sealed": {"filesTotal": 3, "filesScanned": 3, "rowsScanned": 99000, "bytesScanned": 6811648, "fileBytes": 52424704}
 }
 ```
 
 The numbers are plan-derived. They report the files the planner decided the query needs, plus those files' catalog and manifest sizes. They are not engine-measured input/output (I/O). The tiers prune by different mechanisms, so the report keeps them separate.
+
+`bytesScanned` is what the query reads of those files (T-704): the bytes of the columns it references, summed from the catalog's per-file column stats, since Parquet is columnar and the engine reads only those chunks. It is the number to bill on, as BigQuery's bytes processed is: `SELECT count(*)` over a 92 GB table scans 0 bytes, `SELECT UserID` one column of a hundred, `SELECT *` all of it. `fileBytes` is the whole size of the same files, the upper bound. On the hot tier the two are equal, since a micro-segment is small and served whole by its buffer pod; they are also equal when the catalog has no per-column sizes. The count is by column name over the whole statement, so a join whose tables share a column name counts it for both.
 
 For the hot tier, `filesTotal` counts the micro-segments that passed the membership rule. `filesScanned` counts what survived the WHERE pruner and the Top-N bound (T-400): the planner's pruning, counted. For the sealed tier, both fields count the segments listed at the pinned snapshot. DuckDB may prune further at scan time; the planner cannot see that.
 
