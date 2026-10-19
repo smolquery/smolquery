@@ -1038,6 +1038,20 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert job.scatter == nil
   end
 
+  test "sealed files the planner pruned are not dealt to any shard (T-705)",
+       %{control: control, distributed: distributed} do
+    sql = "SELECT count(*) AS n, max(id) AS m FROM analytics.events WHERE id > 4"
+    both(control, distributed, sql)
+
+    assert {:ok, %{state: :done} = job, frame} = Client.query(distributed, sql, trace: true)
+    assert %{"n" => [11], "m" => [15]} = DataFrame.to_columns(frame)
+
+    assert %{files_total: 6, files_scanned: 4} = job.statistics.sealed
+    shards = Enum.filter(job.trace, &(&1.name == :shard))
+    assert Enum.sum_by(shards, & &1.meta.files) == 5
+    assert Enum.sum_by(shards, & &1.meta.hot_files) == 1
+  end
+
   test "a query that does not decompose still answers", %{distributed: distributed} do
     assert {:ok, %{state: :done} = job, frame} =
              Client.query(distributed, "SELECT id, name FROM analytics.events ORDER BY id")

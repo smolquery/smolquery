@@ -271,6 +271,7 @@ defmodule Smolquery.QueryService.Planner do
   alias Smolquery.QueryService.Pruner
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.ScanColumns
+  alias Smolquery.QueryService.SealedBounds
   alias Smolquery.QueryService.Statistics
   alias Smolquery.QueryService.TopN
   alias Smolquery.QueryService.Trace
@@ -304,7 +305,6 @@ defmodule Smolquery.QueryService.Planner do
          {:ok, snapshot} <-
            Trace.span(:snapshot, fn -> pinned_snapshot(runtime, Keyword.get(pin, :snapshot)) end),
          {:ok, tables} <- Trace.span(:resolve, fn -> resolve(runtime, refs, snapshot) end),
-         tables = Trace.span(:columns, fn -> scanned(runtime, statement, snapshot, tables) end),
          :ok <- fresh_pin(runtime, Keyword.get(pin, :hot_before_ms)),
          folded =
            Trace.span(:fold, fn ->
@@ -315,6 +315,8 @@ defmodule Smolquery.QueryService.Planner do
              )
            end),
          conjuncts = Pruner.conjuncts(statement, refs, params, folded),
+         tables =
+           Trace.span(:sealed, fn -> scanned(runtime, statement, snapshot, tables, conjuncts) end),
          top_n = TopN.spec(statement, refs),
          any_n = AnyN.spec(statement, refs),
          page = newest_page(any_n, runtime, tables, pin),
@@ -683,34 +685,69 @@ defmodule Smolquery.QueryService.Planner do
     end)
   end
 
-  defp scanned(runtime, statement, snapshot, tables) do
+  defp scanned(runtime, statement, snapshot, tables, conjuncts) do
     schemas = Map.new(tables, fn {ref, %{schema: schema}} -> {ref, schema} end)
     referenced = ScanColumns.referenced(statement, schemas)
 
     Map.new(tables, fn {ref, table} ->
-      {ref, Map.put(table, :stats, scan_bytes(runtime, ref, snapshot, table, referenced[ref]))}
+      scan = sealed_scan(runtime, ref, snapshot, table, referenced[ref], conjuncts[ref] || [])
+      {ref, Map.merge(table, scan)}
     end)
   end
 
-  defp scan_bytes(_runtime, _ref, _snapshot, %{stats: :unavailable}, _columns), do: :unavailable
+  defp sealed_scan(_runtime, _ref, _snapshot, %{stats: :unavailable}, _columns, _conjuncts),
+    do: %{skipped: MapSet.new()}
 
-  defp scan_bytes(_runtime, _ref, _snapshot, %{stats: stats}, :all),
-    do: Map.put(stats, :scan_bytes, stats.bytes)
-
-  defp scan_bytes(_runtime, _ref, _snapshot, %{stats: stats}, []),
-    do: Map.put(stats, :scan_bytes, 0)
-
-  defp scan_bytes(runtime, ref, snapshot, %{stats: stats, schema: schema}, names) do
+  defp sealed_scan(runtime, ref, snapshot, %{stats: stats, schema: schema}, columns, conjuncts) do
     ids = Smolquery.Schema.field_ids(schema) || %{}
+    bounds = column_ids(ids, SealedBounds.prunable(schema, conjuncts))
 
-    with [_ | _] = sizes <- for(name <- names, id = ids[name], id, do: id),
-         {:ok, files} <-
-           Catalog.file_column_stats(runtime.catalog, ref, snapshot, %{sizes: sizes, bounds: []}) do
-      Map.put(stats, :scan_bytes, Enum.sum_by(files, & &1.column_bytes))
-    else
-      _unresolved_or_unsupported -> Map.put(stats, :scan_bytes, stats.bytes)
+    case sealed_files(runtime, ref, snapshot, columns, %{
+           sizes: column_ids(ids, columns),
+           bounds: bounds
+         }) do
+      :whole ->
+        %{stats: Map.put(stats, :scanned, whole(stats, columns)), skipped: MapSet.new()}
+
+      {:ok, files} ->
+        {kept, skipped} = Enum.split_with(files, &SealedBounds.keep?(&1, schema, conjuncts, ids))
+
+        %{
+          stats: Map.put(stats, :scanned, sealed_scanned(kept, columns)),
+          skipped: MapSet.new(skipped, & &1.path)
+        }
     end
   end
+
+  defp sealed_files(_runtime, _ref, _snapshot, _columns, %{sizes: [], bounds: []}), do: :whole
+  defp sealed_files(_runtime, _ref, _snapshot, [_ | _], %{sizes: []}), do: :whole
+
+  defp sealed_files(runtime, ref, snapshot, _columns, request) do
+    case Catalog.file_column_stats(runtime.catalog, ref, snapshot, request) do
+      {:ok, files} -> {:ok, files}
+      {:error, _unsupported_or_failed} -> :whole
+    end
+  end
+
+  defp column_ids(_ids, :all), do: []
+  defp column_ids(ids, names), do: for(name <- names, id = ids[name], id, do: id)
+
+  defp sealed_scanned(kept, columns) do
+    bytes = Enum.sum_by(kept, & &1.bytes)
+
+    %{
+      files: length(kept),
+      rows: Enum.sum_by(kept, & &1.rows),
+      bytes: bytes,
+      column_bytes: if(columns == :all, do: bytes, else: Enum.sum_by(kept, & &1.column_bytes))
+    }
+  end
+
+  defp whole(stats, []),
+    do: %{files: stats.files, rows: stats.rows, bytes: stats.bytes, column_bytes: 0}
+
+  defp whole(stats, _all_or_unresolved),
+    do: %{files: stats.files, rows: stats.rows, bytes: stats.bytes, column_bytes: stats.bytes}
 
   # A table with a materialized column reads the registration snapshot of
   # each sealed file, so the view can tell which files predate the column
@@ -916,12 +953,16 @@ defmodule Smolquery.QueryService.Planner do
     case Catalog.segment_files(runtime.catalog, ref, snapshot) do
       {:ok, files} ->
         files
-        |> Enum.reject(&FileCache.cached?(runtime.name, Path.basename(&1.path)))
+        |> Enum.reject(&skipped_or_cached?(runtime, table, &1.path))
         |> Enum.sum_by(& &1.bytes)
 
       {:error, _reason} ->
         live_bytes(table)
     end
+  end
+
+  defp skipped_or_cached?(runtime, table, path) do
+    MapSet.member?(table.skipped, path) or FileCache.cached?(runtime.name, Path.basename(path))
   end
 
   defp live_bytes(%{stats: %{bytes: bytes}}), do: bytes
@@ -947,7 +988,8 @@ defmodule Smolquery.QueryService.Planner do
         |> Map.new(fn {ref, entries} -> {ref, Enum.map(entries, &:binary.copy(&1["id"]))} end),
       schemas: schemas,
       non_null: Nullability.columns(query.statement, schemas),
-      statistics: statistics(members, hot, tables)
+      statistics: statistics(members, hot, tables),
+      sealed_skipped: Map.new(tables, fn {ref, %{skipped: skipped}} -> {ref, skipped} end)
     }
   end
 
@@ -967,15 +1009,13 @@ defmodule Smolquery.QueryService.Planner do
           Enum.sum_by(surviving, & &1["byte_size"])
         )
 
-      sealed_files = Enum.sum_by(sealed, & &1.files)
-
       sealed_tier =
         Statistics.tier(
-          sealed_files,
-          sealed_files,
-          Enum.sum_by(sealed, & &1.rows),
-          Enum.sum_by(sealed, & &1.scan_bytes),
-          Enum.sum_by(sealed, & &1.bytes)
+          Enum.sum_by(sealed, & &1.files),
+          Enum.sum_by(sealed, & &1.scanned.files),
+          Enum.sum_by(sealed, & &1.scanned.rows),
+          Enum.sum_by(sealed, & &1.scanned.column_bytes),
+          Enum.sum_by(sealed, & &1.scanned.bytes)
         )
 
       Statistics.new(hot_tier, sealed_tier)

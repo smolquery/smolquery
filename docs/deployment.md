@@ -220,9 +220,11 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
-### Next release: bytes scanned count the columns a query reads (T-704)
+### Next release: bytes scanned count the columns a query reads, over the files it keeps (T-704, T-705)
 
-**TL;DR.** A job's `statistics.bytesScanned`, and the query page's "scanned N MiB", now count the bytes of the columns the query references, not the whole files: `SELECT count(*)` over the 92 GB bench table reports 0, `SELECT UserID` one column's worth, `SELECT *` the old number. The old number is still there as `fileBytes`. Anything that read `bytesScanned` as a file total should read `fileBytes` now. Nothing to configure.
+**TL;DR.** A job's `statistics.bytesScanned`, and the query page's "scanned N MiB", now count the bytes of the columns the query references, not the whole files: `SELECT count(*)` over the 92 GB bench table reports 0, `SELECT UserID` one column's worth, `SELECT *` the old number. The old number is still there as `fileBytes`. Anything that read `bytesScanned` as a file total should read `fileBytes` now. And the planner now prunes sealed files by the catalog's per-file bounds, so a bounded query over a sorted table counts only the files it keeps, and a burst query scatters only those. Nothing to configure.
+
+- **Sealed files are pruned before the scatter (T-705).** A WHERE bound on an integer, double, timestamp or date column skips every sealed file whose catalog minimum and maximum put all its rows outside the bound, the same pruning DuckLake does for itself on the single-engine path. `filesScanned`, `rowsScanned`, `bytesScanned` and `fileBytes` count the kept files; `filesTotal` still counts every live file. A burst query deals only the kept files to its shards, so a time-windowed query over the bench table no longer leases runners for files it will not read. String and decimal bounds are left to the engine, since the catalog's text bounds are not proven exact for them.
 
 - **Why.** Parquet is columnar and DuckDB reads only the referenced column chunks, so the file total overstated a narrow query by up to a hundredfold on a wide table, and a BigQuery alternative has to account for what a query reads, which is what BigQuery bills as bytes processed.
 - **Where the number comes from.** DuckLake keeps `column_size_bytes` per file and column (`ducklake_file_column_stats`); the planner names the referenced columns from the statement's AST and reads, for every live file at the pinned snapshot, the sum of their chunk sizes, one row per file through the `(table_id, data_file_id)` index (T-696). One more catalog read per plan, the size of the segment list the scatter already reads; a bare `count(*)` and a `SELECT *` read nothing extra.

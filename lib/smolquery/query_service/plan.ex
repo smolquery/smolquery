@@ -67,6 +67,7 @@ defmodule Smolquery.QueryService.Plan do
     :snapshot,
     :statistics,
     sealed_uncached_bytes: 0,
+    sealed_skipped: %{},
     tables: [],
     statements: [],
     hot: %{},
@@ -90,6 +91,7 @@ defmodule Smolquery.QueryService.Plan do
           non_null: [boolean()] | :unknown,
           statistics: Statistics.t() | nil,
           sealed_uncached_bytes: non_neg_integer(),
+          sealed_skipped: %{Catalog.table_ref() => MapSet.t(String.t())},
           federated: boolean(),
           federated_extensions: [atom()],
           params: [term()]

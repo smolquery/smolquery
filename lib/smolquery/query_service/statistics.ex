@@ -14,11 +14,13 @@ defmodule Smolquery.QueryService.Statistics do
   (`Smolquery.QueryService.Pruner`) and the Top-N bound
   (`Smolquery.QueryService.TopN`) — so `files_total` (entries that passed
   the membership rule) versus `files_scanned` (entries the plan kept)
-  measures the two together. The
-  sealed tier prunes inside DuckDB from DuckLake's per-file stats, which the
-  planner cannot observe — there `files_scanned` equals `files_total` and
-  both mean "sealed segments listed at the snapshot": the upper bound the
-  engine starts from, and the files needed to serve the query.
+  measures the two together. The sealed tier is pruned by the planner from
+  the catalog's per-file bounds (`Smolquery.QueryService.SealedBounds`,
+  T-705) on integer, double, timestamp and date columns: `files_total` is
+  the segments listed at the snapshot, `files_scanned` the ones a match is
+  possible in. DuckDB may prune further inside the engine, on a string
+  bound or a row group, which the planner cannot observe, so the sealed
+  count is an upper bound on what is read.
 
   Rows and bytes sum over the scanned files' manifest and catalog stats. They
   are plan-derived sizes, not engine-measured I/O — `EXPLAIN ANALYZE` is the
