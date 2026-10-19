@@ -805,7 +805,29 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
          merge_peer_weight: 1
        ]
   test "runners spill their partials split by group-key hash, and one level merges whole buckets (T-701)",
-       %{control: control, distributed: distributed, tmp_dir: tmp_dir, catalog: catalog} do
+       context do
+    bucket_level(context)
+  end
+
+  @tag burst: [
+         max: 4,
+         spill: true,
+         spill_inline_max_bytes: 0,
+         merge_min_bytes: 0,
+         merge_partitions: 2,
+         merge_max_files: 1
+       ]
+  test "a bucket shard is bound by files: every bucket is a shard of its own, and a peer's share stops there (T-702)",
+       context do
+    bucket_level(context)
+  end
+
+  defp bucket_level(%{
+         control: control,
+         distributed: distributed,
+         tmp_dir: tmp_dir,
+         catalog: catalog
+       }) do
     seal_seventh(catalog, tmp_dir)
     sql = "SELECT id, count(*) AS c FROM analytics.events GROUP BY id ORDER BY id"
     both(control, distributed, sql, burst: 4)

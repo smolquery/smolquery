@@ -85,7 +85,8 @@ defmodule Smolquery.Burst do
     merge_target_bytes: 134_217_728,
     merge_min_bytes: 536_870_912,
     merge_peer_weight: 4,
-    merge_partitions: 16
+    merge_partitions: 16,
+    merge_max_files: 256
   ]
 
   @doc "The pool runners are leased from."
@@ -136,10 +137,11 @@ defmodule Smolquery.Burst do
   a runner partial over `spill_inline_max_bytes` is written to the sealed
   store under `spill_prefix` and returned as a location, not as bytes, and
   the tree merge deals spilled partials into merge shards of up to
-  `merge_target_bytes` and `merge_fan_in` inputs, does not run under
-  `merge_min_bytes` of them, and gives the peers `merge_peer_weight` such
-  groups each before the runners get the rest (T-685, T-700, T-701). Configured keys override
-  the defaults; `Smolquery.QueryService.Runtime` reads it at boot.
+  `merge_target_bytes`, `merge_fan_in` inputs and `merge_max_files` input
+  files, does not run under `merge_min_bytes` of them, and gives the peers
+  `merge_peer_weight` such groups each before the runners get the rest
+  (T-685, T-700, T-701, T-702). Configured keys override the defaults;
+  `Smolquery.QueryService.Runtime` reads it at boot.
   """
   @spec policy() :: keyword()
   def policy do

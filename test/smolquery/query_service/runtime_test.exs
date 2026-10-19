@@ -53,6 +53,7 @@ defmodule Smolquery.QueryService.RuntimeTest do
       assert default.burst.merge_min_bytes == 536_870_912
       assert default.burst.merge_peer_weight == 4
       assert default.burst.merge_partitions == 16
+      assert default.burst.merge_max_files == 256
       assert default.burst.spill_prefix == "burst-partials"
 
       leased =

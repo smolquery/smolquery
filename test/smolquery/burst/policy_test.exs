@@ -63,7 +63,8 @@ defmodule Smolquery.Burst.PolicyTest do
     merge_fan_in: 16,
     merge_target_bytes: 128 * @mib,
     merge_min_bytes: 0,
-    merge_peer_weight: 4
+    merge_peer_weight: 4,
+    merge_max_files: 256
   }
 
   defp partials(sizes), do: Enum.with_index(sizes, fn bytes, i -> %{index: i, bytes: bytes} end)
@@ -122,8 +123,8 @@ defmodule Smolquery.Burst.PolicyTest do
   end
 
   describe "partition_groups/2 (T-701)" do
-    defp buckets(sizes),
-      do: Enum.with_index(sizes, fn bytes, p -> %{partition: p, bytes: bytes} end)
+    defp buckets(sizes, files \\ 1),
+      do: Enum.with_index(sizes, fn bytes, p -> %{partition: p, bytes: bytes, files: files} end)
 
     test "packs whole partitions largest first up to the target, one over the target alone" do
       sizes = [60 * @mib, 10 * @mib, 300 * @mib, 10 * @mib, 60 * @mib, 10 * @mib]
@@ -133,6 +134,15 @@ defmodule Smolquery.Burst.PolicyTest do
                [%{partition: 0}, %{partition: 4}],
                [%{partition: 1}, %{partition: 3}, %{partition: 5}]
              ] = Policy.partition_groups(buckets(sizes), @merge)
+    end
+
+    test "packs under merge_max_files too, one over the bound alone (T-702)" do
+      sizes = [@mib, @mib, @mib, @mib]
+
+      assert [[_, _], [_, _]] = Policy.partition_groups(buckets(sizes, 100), @merge)
+      assert [[_], [_], [_], [_]] = Policy.partition_groups(buckets(sizes, 250), @merge)
+      assert [[_], [_], [_], [_]] = Policy.partition_groups(buckets(sizes, 300), @merge)
+      assert [[_, _, _, _]] = Policy.partition_groups(buckets(sizes, 64), @merge)
     end
 
     test "a fan-in under 2 turns bucket levels off too" do
@@ -179,6 +189,23 @@ defmodule Smolquery.Burst.PolicyTest do
     test "a weight of 0 sends every group to a runner" do
       shards = Policy.merge_shards(groups(3), @peers, %{@merge | merge_peer_weight: 0})
       assert [{:runner, [_, _]}, {:runner, [_, _]}, {:runner, [_, _]}] = shards
+    end
+
+    test "a peer's share stops at merge_max_files, and the groups left go to runners (T-702)" do
+      wide = for i <- 1..9, do: [%{partition: i, bytes: @mib, files: 100}]
+      shards = Policy.merge_shards(wide, @peers, @merge)
+
+      assert [{{:peer, :a}, a}, {{:peer, :b}, b}, {{:peer, :c}, c} | runners] = shards
+      assert Enum.map([a, b, c], &length/1) == [2, 2, 2]
+      assert [{:runner, [_]}, {:runner, [_]}, {:runner, [_]}] = runners
+
+      over = for i <- 1..3, do: [%{partition: i, bytes: @mib, files: 300}]
+
+      assert [{{:peer, :a}, [_]}, {{:peer, :b}, [_]}, {{:peer, :c}, [_]}] =
+               Policy.merge_shards(over, @peers, @merge)
+
+      assert [{{:peer, :a}, [_, _]}, {{:peer, :b}, [_, _]}, {{:peer, :c}, [_, _]} | _rest] =
+               Policy.merge_shards(groups(15), @peers, %{@merge | merge_max_files: 2})
     end
 
     test "a level that would be one shard is not run" do
