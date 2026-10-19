@@ -125,15 +125,18 @@ defmodule Smolquery.Burst.PolicyTest do
     defp buckets(sizes),
       do: Enum.with_index(sizes, fn bytes, p -> %{partition: p, bytes: bytes} end)
 
-    test "packs whole partitions up to the target, one over the target alone" do
-      sizes = [60 * @mib, 60 * @mib, 300 * @mib, 10 * @mib, 10 * @mib, 10 * @mib]
+    test "packs whole partitions largest first up to the target, one over the target alone" do
+      sizes = [60 * @mib, 10 * @mib, 300 * @mib, 10 * @mib, 60 * @mib, 10 * @mib]
 
       assert [
-               [%{partition: 0}, %{partition: 1}],
                [%{partition: 2}],
-               [%{partition: 3}, %{partition: 4}, %{partition: 5}]
-             ] =
-               Policy.partition_groups(buckets(sizes), @merge)
+               [%{partition: 0}, %{partition: 4}],
+               [%{partition: 1}, %{partition: 3}, %{partition: 5}]
+             ] = Policy.partition_groups(buckets(sizes), @merge)
+    end
+
+    test "a fan-in under 2 turns bucket levels off too" do
+      assert [] == Policy.partition_groups(buckets([@mib, @mib]), %{@merge | merge_fan_in: 1})
     end
 
     test "under merge_min_bytes there is no level" do

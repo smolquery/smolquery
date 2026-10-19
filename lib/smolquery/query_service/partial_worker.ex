@@ -121,7 +121,11 @@ defmodule Smolquery.QueryService.PartialWorker do
   with a `-p<bucket>` suffix. The reply's `spilled` then has `parts` and
   no single location. A merge shard can take one bucket across every
   runner's partial and finish its groups in one level, since no group
-  lands in two buckets. A bucket no row hashed to writes no file.
+  lands in two buckets. The count is the request's at most: a bucket is
+  worth an object when it holds at least a quarter of what would travel
+  inline, so a small partial splits into fewer buckets and the final does not
+  open sixteen files for every 5 MB. A bucket no row
+  hashed to writes no file, and a split that writes none spills whole.
   """
 
   alias Smolquery.AwsCredentials
@@ -555,8 +559,8 @@ defmodule Smolquery.QueryService.PartialWorker do
       size <= max ->
         {:ok, %{parquet: File.read!(path), spilled: nil}}
 
-      match?(%{partitions: %{count: count}} when count > 1, spill) ->
-        split(connection, path, spill, store, request)
+      buckets(spill, size) > 1 ->
+        split(connection, path, spill, buckets(spill, size), store, request)
 
       true ->
         spill_whole(path, spill, store)
@@ -565,6 +569,11 @@ defmodule Smolquery.QueryService.PartialWorker do
 
   defp deliver(_connection, path, _inline, _store),
     do: {:ok, %{parquet: File.read!(path), spilled: nil}}
+
+  defp buckets(%{partitions: %{count: count}, inline_max_bytes: max}, size) when count > 1,
+    do: size |> div(max(div(max, 4), 1)) |> max(1) |> min(count)
+
+  defp buckets(_whole, _size), do: 1
 
   defp spill_whole(path, %{key: key}, store) do
     case Store.put(store, key, &stage(path, &1)) do
@@ -576,18 +585,25 @@ defmodule Smolquery.QueryService.PartialWorker do
     end
   end
 
-  defp split(connection, path, %{key: key, partitions: %{count: count, by: by}}, store, request) do
+  defp split(connection, path, %{key: key, partitions: %{by: by}} = spill, count, store, request) do
     directory = Path.join(Path.dirname(path), "parts")
 
     statement =
-      "COPY (SELECT *, (#{by}) AS __pq_part FROM read_parquet(#{Identifier.sql_string(path)})) " <>
+      "COPY (SELECT *, (#{by}) % #{count} AS __pq_part " <>
+        "FROM read_parquet(#{Identifier.sql_string(path)})) " <>
         "TO #{Identifier.sql_string(directory)} (FORMAT parquet, PARTITION_BY (__pq_part))"
 
     with {:ok, _result} <-
            Connection.query(connection, statement, [], Map.get(request, :timeout_ms, :infinity)),
          {:ok, parts} <- upload_parts(directory, count, key, store) do
-      bytes = Enum.sum_by(parts, & &1.bytes)
-      {:ok, %{parquet: nil, spilled: %{location: nil, key: key, bytes: bytes, parts: parts}}}
+      case parts do
+        [] ->
+          spill_whole(path, spill, store)
+
+        parts ->
+          bytes = Enum.sum_by(parts, & &1.bytes)
+          {:ok, %{parquet: nil, spilled: %{location: nil, key: key, bytes: bytes, parts: parts}}}
+      end
     end
   end
 

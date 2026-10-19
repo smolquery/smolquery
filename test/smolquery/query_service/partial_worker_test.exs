@@ -112,7 +112,7 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       request =
         Map.merge(request, %{
           partial_sql: "SELECT id % 2 AS g, sum(id) AS s FROM analytics.events GROUP BY g",
-          spill: %{key: key, inline_max_bytes: 0, partitions: %{count: 4, by: "hash(\"g\") % 4"}}
+          spill: %{key: key, inline_max_bytes: 0, partitions: %{count: 4, by: "hash(\"g\")"}}
         })
 
       assert {:ok,
@@ -142,6 +142,34 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
         |> Enum.sort()
 
       assert rows == [{0, 2}, {1, 4}]
+    end
+
+    test "a small partial splits into fewer buckets, and a split that writes nothing spills whole (T-701)",
+         %{request: request, store: store} do
+      key = "burst-partials/job/4.parquet"
+      partitions = %{count: 16, by: "hash(\"g\")"}
+
+      small =
+        Map.merge(request, %{
+          partial_sql: "SELECT id AS g, sum(id) AS s FROM analytics.events GROUP BY g",
+          spill: %{key: key, inline_max_bytes: 200, partitions: partitions}
+        })
+
+      assert {:ok, %{rows: 3, spilled: %{parts: parts}}} = PartialWorker.run_standalone(small)
+      assert parts != [] and Enum.all?(parts, &(&1.partition in 0..5))
+      location = Store.location(store, key)
+
+      empty =
+        Map.merge(request, %{
+          partial_sql:
+            "SELECT id % 2 AS g, sum(id) AS s FROM analytics.events WHERE id > 100 GROUP BY g",
+          spill: %{key: key, inline_max_bytes: 0, partitions: partitions}
+        })
+
+      assert {:ok, %{rows: 0, spilled: %{location: ^location, key: ^key} = spilled}} =
+               PartialWorker.run_standalone(empty)
+
+      refute Map.has_key?(spilled, :parts)
     end
 
     test "a spill the store refuses is the shard's failure, not a crash", %{

@@ -144,20 +144,25 @@ defmodule Smolquery.Burst.Policy do
 
   @doc """
   The merge groups one level deals `partitions` into, each a list of
-  whole partitions in the order given packed up to `merge_target_bytes`,
-  a partition over the target alone; none when the partitions together
-  are under `merge_min_bytes`. A partition here is the sum of one hash
+  whole partitions packed largest first up to `merge_target_bytes`, a
+  partition over the target alone; none when the partitions together are
+  under `merge_min_bytes` or the tree is off (`merge_fan_in` under 2).
+  `merge_fan_in` does not otherwise bound a bucket shard, which reads one
+  file per runner per bucket. A partition here is the sum of one hash
   bucket across every spilled partial, and no two of them share a group,
   so a shard over a group of them answers complete groups and the level
   is the last.
   """
   @spec partition_groups([partial()], merge_config()) :: [[partial()]]
+  def partition_groups(_partitions, %{merge_fan_in: fan_in}) when fan_in < 2, do: []
+
   def partition_groups(partitions, %{merge_min_bytes: floor, merge_target_bytes: target}) do
     if Enum.sum_by(partitions, & &1.bytes) < floor, do: [], else: pack(partitions, target)
   end
 
   defp pack(partitions, target) do
     partitions
+    |> Enum.sort_by(& &1.bytes, :desc)
     |> Enum.reduce([], fn
       partition, [{group, bytes} | rest] when bytes + partition.bytes <= target ->
         [{[partition | group], bytes + partition.bytes} | rest]

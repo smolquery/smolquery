@@ -83,13 +83,15 @@ defmodule Smolquery.QueryService.Scatter do
      (`Policy.merge_shrank?/2`); what is left merges with the inline
      partials in the final. When `burst.merge_partitions` is over 1 and
      the decomposition has group keys, a runner spills its partial split
-     by `hash(keys) % partitions` (`Decomposer.partition_sql/2`), and the
+     by `hash(keys) % partitions` (`Decomposer.partition_hash/1`), and the
      level is dealt by partition instead (`Policy.partition_groups/2`): a
      shard takes whole buckets across every runner's partial, every group
      it answers is complete, and that one level is the merge; the final
-     reads the shrunk outputs. The inputs every level consumed are deleted
-     with the job's other spills after the final, off the merge's
-     critical path. A merge shard is a `shard` span
+     reads the shrunk outputs. After the final the job's spill prefix is
+     listed and swept, off the merge's critical path; the keys the
+     coordinator can name are the fallback when the store cannot list, since
+     a runner that went silent after uploading some of its buckets left
+     objects nothing else names. A merge shard is a `shard` span
      with `merge_level` and `inputs`, and the levels sit under one
      `tree_merge` span. A merge shard is not retried on a peer, since a
      peer's request has no spill and its partial would come back inline:
@@ -145,18 +147,14 @@ defmodule Smolquery.QueryService.Scatter do
   @type target ::
           %{index: non_neg_integer(), kind: :peer, node: node()}
           | %{index: non_neg_integer(), kind: :runner, pool: atom()}
-          | %{
-              index: non_neg_integer(),
-              kind: :runner,
-              pool: atom(),
-              merge: %{level: pos_integer(), locations: [String.t()]}
-            }
-          | %{
-              index: non_neg_integer(),
-              kind: :peer,
-              node: node(),
-              merge: %{level: pos_integer(), locations: [String.t()]}
-            }
+          | %{index: non_neg_integer(), kind: :runner, pool: atom(), merge: merge()}
+          | %{index: non_neg_integer(), kind: :peer, node: node(), merge: merge()}
+
+  @type merge :: %{
+          required(:level) => pos_integer(),
+          required(:locations) => [String.t()],
+          optional(:partitions) => pos_integer()
+        }
 
   @typedoc """
   How a scattered job was answered: its shard count and merged partial
@@ -428,14 +426,14 @@ defmodule Smolquery.QueryService.Scatter do
           answer(runtime, connection, decomposition, dealt, partials, {inputs, consumed}, job_id)
 
         {:error, reason} ->
-          sweep_spills(runtime, dealt, job_id)
+          sweep_spills(runtime, job_id, spill_keys(runtime, dealt, job_id))
           Logger.warning("distributed query fell back: #{inspect(reason)}")
 
           :fallback
       end
     catch
       kind, reason ->
-        sweep_spills(runtime, dealt, job_id)
+        sweep_spills(runtime, job_id, spill_keys(runtime, dealt, job_id))
         :erlang.raise(kind, reason, __STACKTRACE__)
     after
       File.rm_rf(partials_dir)
@@ -448,7 +446,11 @@ defmodule Smolquery.QueryService.Scatter do
         merge(runtime, connection, decomposition, inputs)
       end)
 
-    delete_spilled(runtime, consumed ++ cleanup_keys(runtime, dealt, partials, inputs, job_id))
+    sweep_spills(
+      runtime,
+      job_id,
+      consumed ++ cleanup_keys(runtime, dealt, partials, inputs, job_id)
+    )
 
     case merged do
       {:ok, frame} ->
@@ -490,16 +492,16 @@ defmodule Smolquery.QueryService.Scatter do
   defp spill_key(%Runtime{burst: %{spill_prefix: prefix}}, job_id, index),
     do: "#{prefix}/#{job_id}/#{index}.parquet"
 
-  defp sweep_spills(%Runtime{store: nil}, _dealt, _job_id), do: :ok
+  defp sweep_spills(%Runtime{store: nil}, _job_id, _fallback_keys), do: :ok
 
   defp sweep_spills(
          %Runtime{store: store, burst: %{spill_prefix: prefix}} = runtime,
-         dealt,
-         job_id
+         job_id,
+         keys
        ) do
     case Store.list(store, "#{prefix}/#{job_id}") do
-      {:ok, keys} -> delete_spilled(runtime, keys)
-      {:error, _unlisted} -> delete_spilled(runtime, spill_keys(runtime, dealt, job_id))
+      {:ok, listed} -> delete_spilled(runtime, listed)
+      {:error, _unlisted} -> delete_spilled(runtime, keys)
     end
   end
 
@@ -916,7 +918,7 @@ defmodule Smolquery.QueryService.Scatter do
   defp with_partitions(spill, _scan_target, %{runtime: runtime, decomposition: decomposition}) do
     count = runtime.burst.merge_partitions
 
-    case count > 1 && Decomposer.partition_sql(decomposition, count) do
+    case count > 1 && Decomposer.partition_hash(decomposition) do
       by when is_binary(by) -> Map.put(spill, :partitions, %{count: count, by: by})
       _none -> spill
     end

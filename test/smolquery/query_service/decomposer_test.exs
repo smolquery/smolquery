@@ -95,11 +95,11 @@ defmodule Smolquery.QueryService.DecomposerTest do
     expected = Engine.query!(@engine, sql)
     {:ok, decomposition} = Decomposer.decompose(@conn, sql, describe(sql), @columns)
     paths = partials(decomposition, tmp_dir)
-    by = Decomposer.partition_sql(decomposition, 3)
+    by = Decomposer.partition_hash(decomposition)
 
     buckets =
       for partition <- 0..2 do
-        from = "(SELECT * FROM #{Views.read_parquet(paths)} WHERE #{by} = #{partition})"
+        from = "(SELECT * FROM #{Views.read_parquet(paths)} WHERE #{by} % 3 = #{partition})"
         repartial(decomposition, from, tmp_dir)
       end
 
@@ -585,30 +585,38 @@ defmodule Smolquery.QueryService.DecomposerTest do
     end
   end
 
-  describe "partition_sql/2 (T-701)" do
-    test "hashes the group keys modulo the count, and is nil without group keys", %{
+  describe "partition_hash/1 (T-701)" do
+    test "hashes the group keys, selected or not, and is nil without group keys", %{
       tmp_dir: tmp_dir
     } do
       grouped = "SELECT tag, count(*) AS c, sum(value) AS v FROM analytics.events GROUP BY tag"
       {:ok, decomposition} = Decomposer.decompose(@conn, grouped, describe(grouped), @columns)
-      assert Decomposer.partition_sql(decomposition, 4) == ~s|hash("__pq_g0") % 4|
+      assert Decomposer.partition_hash(decomposition) == ~s|hash("__pq_g0")|
 
       two = "SELECT tag, big % 3 AS m, count(*) AS c FROM analytics.events GROUP BY tag, m"
       {:ok, decomposition} = Decomposer.decompose(@conn, two, describe(two), @columns)
-      assert Decomposer.partition_sql(decomposition, 16) == ~s|hash("__pq_g0", "__pq_g1") % 16|
+      assert Decomposer.partition_hash(decomposition) == ~s|hash("__pq_g0", "__pq_g1")|
+
+      unselected = "SELECT count(*) AS c FROM analytics.events GROUP BY tag"
+
+      {:ok, decomposition} =
+        Decomposer.decompose(@conn, unselected, describe(unselected), @columns)
+
+      assert Decomposer.partition_hash(decomposition) == ~s|hash("__pq_g0")|
 
       global = "SELECT count(*) AS c, sum(value) AS v FROM analytics.events"
       {:ok, decomposition} = Decomposer.decompose(@conn, global, describe(global), @columns)
-      assert Decomposer.partition_sql(decomposition, 4) == nil
+      assert Decomposer.partition_hash(decomposition) == nil
 
       rows =
         "SELECT bucket, count(*) AS n FROM " <>
           "(SELECT bucket, value FROM analytics.events WHERE id < 500 LIMIT 5000) e GROUP BY bucket"
 
       {:ok, decomposition} = Decomposer.decompose(@conn, rows, describe(rows), @columns)
-      assert Decomposer.partition_sql(decomposition, 4) == nil
+      assert Decomposer.partition_hash(decomposition) == nil
 
       partition_round_trip(grouped, tmp_dir)
+      partition_round_trip(unselected, tmp_dir)
     end
   end
 
