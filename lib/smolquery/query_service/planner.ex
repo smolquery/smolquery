@@ -683,10 +683,6 @@ defmodule Smolquery.QueryService.Planner do
     end)
   end
 
-  # The sealed tier's bytes are the referenced columns' (T-704): the ids of
-  # the names `ScanColumns` finds, summed by the catalog over the live files;
-  # a star reads whole files, a bare count reads none, and a catalog
-  # without per-column sizes falls back to the whole files.
   defp scanned(runtime, statement, snapshot, tables) do
     schemas = Map.new(tables, fn {ref, %{schema: schema}} -> {ref, schema} end)
     referenced = ScanColumns.referenced(statement, schemas)
@@ -705,22 +701,15 @@ defmodule Smolquery.QueryService.Planner do
     do: Map.put(stats, :scan_bytes, 0)
 
   defp scan_bytes(runtime, ref, snapshot, %{stats: stats, schema: schema}, names) do
-    ids =
-      for name <- names,
-          {:ok, %Smolquery.Schema.Field{id: id}} <- [Smolquery.Schema.field(schema, name)],
-          id,
-          do: id
+    ids = Smolquery.Schema.field_ids(schema) || %{}
 
-    case Catalog.file_column_stats(runtime.catalog, ref, snapshot, ids) do
-      {:ok, files} -> Map.put(stats, :scan_bytes, column_bytes(files, ids))
-      {:error, _unsupported_or_failed} -> Map.put(stats, :scan_bytes, stats.bytes)
+    with [_ | _] = sizes <- for(name <- names, id = ids[name], id, do: id),
+         {:ok, files} <-
+           Catalog.file_column_stats(runtime.catalog, ref, snapshot, %{sizes: sizes, bounds: []}) do
+      Map.put(stats, :scan_bytes, Enum.sum_by(files, & &1.column_bytes))
+    else
+      _unresolved_or_unsupported -> Map.put(stats, :scan_bytes, stats.bytes)
     end
-  end
-
-  defp column_bytes(files, ids) do
-    Enum.sum_by(files, fn %{columns: columns} ->
-      Enum.sum_by(ids, &(get_in(columns, [&1, :bytes]) || 0))
-    end)
   end
 
   # A table with a materialized column reads the registration snapshot of

@@ -9,12 +9,15 @@ defmodule Smolquery.QueryService.ScanColumns do
   BigQuery bills as bytes processed. `referenced/2` walks the DuckDB AST
   the planner already holds and names, per table, the columns it finds.
 
-  The walk is by name, not by binding: a `COLUMN_REF` counts for every
-  table whose schema has a column of that name, qualified or not, and a
-  `STAR` anywhere (a bare `*`, `t.*`, `COLUMNS(*)`) means every column of
-  every table. A `count(*)` is `count_star` in the AST, not a star, so a
-  bare count references nothing. The answer over-counts a join whose
-  tables share a column name and a `SELECT *` under an `EXCLUDE`; it never
+  The walk is by name, not by binding, and errs toward counting: every
+  part of a `COLUMN_REF` counts for every table whose schema has a column
+  of that name, so `e.ts` counts `ts` and `payload.user_id` counts the
+  `payload` column it reads; the names a `JOIN ... USING` lists count; a
+  `STAR` anywhere (a bare `*`, `t.*`, `COLUMNS(*)`) or a `NATURAL JOIN`
+  means every column of every table. A `count(*)` is `count_star` in the
+  AST, not a star, so a bare count references nothing. The answer
+  over-counts a join whose tables share a column name, an alias that is
+  also a column's name, and a `SELECT *` under an `EXCLUDE`; it never
   under-counts, which is the side a bill should err on.
   """
 
@@ -42,14 +45,18 @@ defmodule Smolquery.QueryService.ScanColumns do
   end
 
   defp collect(%{"class" => "STAR"}, {names, _star}), do: {names, true}
+  defp collect(%{"ref_type" => "NATURAL"}, {names, _star}), do: {names, true}
 
-  defp collect(
-         %{"class" => "COLUMN_REF", "column_names" => [_ | _] = column_names},
-         {names, star}
-       ),
-       do: {MapSet.put(names, List.last(column_names)), star}
+  defp collect(%{"class" => "COLUMN_REF", "column_names" => [_ | _] = parts}, acc),
+    do: named(parts, acc)
+
+  defp collect(%{"using_columns" => [_ | _] = using} = node, acc),
+    do: node |> Map.delete("using_columns") |> collect(named(using, acc))
 
   defp collect(%{} = node, acc), do: node |> Map.values() |> Enum.reduce(acc, &collect/2)
   defp collect(list, acc) when is_list(list), do: Enum.reduce(list, acc, &collect/2)
   defp collect(_scalar, acc), do: acc
+
+  defp named(parts, {names, star}),
+    do: {Enum.reduce(parts, names, fn name, set -> MapSet.put(set, name) end), star}
 end

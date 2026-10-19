@@ -111,13 +111,11 @@ defmodule Smolquery.Catalog do
         }
 
   @typedoc """
-  What the catalog knows of one column in one file: the bytes its chunks
-  take, its bounds as the catalog prints them, its nulls, and whether a
-  float column holds a NaN; any of them `nil` when the catalog did not
-  record it.
+  What the catalog knows of one column's values in one file: its bounds
+  as the catalog prints them, its nulls, and whether a float column holds
+  a NaN; any of them `nil` when the catalog did not record it.
   """
-  @type column_stats :: %{
-          bytes: non_neg_integer() | nil,
+  @type column_bounds :: %{
           min: String.t() | nil,
           max: String.t() | nil,
           null_count: non_neg_integer() | nil,
@@ -125,14 +123,23 @@ defmodule Smolquery.Catalog do
         }
 
   @typedoc """
-  One live file with its rows and size, and `t:column_stats/0` for the
-  column ids asked for that the file has stats for.
+  What `file_column_stats/4` is asked for: the column ids whose chunk
+  bytes to sum per file (`sizes`), and the column ids whose bounds to
+  return per file (`bounds`).
+  """
+  @type column_request :: %{sizes: [pos_integer()], bounds: [pos_integer()]}
+
+  @typedoc """
+  One live file with its rows and size, the bytes its chunks for the
+  `sizes` columns take together, and `t:column_bounds/0` for each of the
+  `bounds` columns the file has stats for.
   """
   @type file_column_stats :: %{
           path: String.t(),
           rows: non_neg_integer(),
           bytes: non_neg_integer(),
-          columns: %{pos_integer() => column_stats()}
+          column_bytes: non_neg_integer(),
+          bounds: %{pos_integer() => column_bounds()}
         }
 
   @typedoc """
@@ -185,7 +192,7 @@ defmodule Smolquery.Catalog do
               {:ok, segment_stats()} | {:error, term()}
   @callback segment_files(config :: term(), table_ref(), snapshot() | :current) ::
               {:ok, [segment_file()]} | {:error, term()}
-  @callback file_column_stats(config :: term(), table_ref(), snapshot(), [pos_integer()]) ::
+  @callback file_column_stats(config :: term(), table_ref(), snapshot(), column_request()) ::
               {:ok, [file_column_stats()]} | {:error, term()}
   @callback drop_segments(config :: term(), table_ref(), [String.t()]) ::
               {:ok, snapshot()} | {:error, term()}
@@ -343,21 +350,22 @@ defmodule Smolquery.Catalog do
     do: call(catalog, :segment_stats, [table, snapshot])
 
   @doc """
-  Every live file at `snapshot` with its rows and size, and the catalog's
-  stats for `column_ids` in it: the bytes each column's chunks take, which
-  is what a query that reads those columns scans (T-704) where
-  `segment_stats/3` sums whole files, and the bounds a planner prunes
-  files by. A catalog without per-column stats answers
+  Every live file at `snapshot` with its rows and size, the bytes its
+  chunks for the `sizes` columns take together, which is what a query
+  that reads those columns scans of it (T-704) where `segment_stats/3`
+  sums whole files, and its bounds for the `bounds` columns, which a
+  planner prunes files by. One row per file, plus one per bound column
+  the file has stats for. A catalog without per-column stats answers
   `{:error, :file_column_stats_unsupported}`, and the caller falls back to
   whole files.
   """
-  @spec file_column_stats(t(), table_ref(), snapshot(), [pos_integer()]) ::
+  @spec file_column_stats(t(), table_ref(), snapshot(), column_request()) ::
           {:ok, [file_column_stats()]} | {:error, term()}
-  def file_column_stats(%__MODULE__{} = catalog, table, snapshot, column_ids) do
+  def file_column_stats(%__MODULE__{} = catalog, table, snapshot, %{} = request) do
     dispatch(
       catalog,
       :file_column_stats,
-      [table, snapshot, column_ids],
+      [table, snapshot, request],
       :file_column_stats_unsupported
     )
   end

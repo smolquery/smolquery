@@ -520,7 +520,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
   end
 
   describe "file_column_stats/4 (T-704)" do
-    test "gives each live file its rows, size, and the asked columns' bytes and bounds", %{
+    test "gives each live file its rows, size, the asked columns' bytes together, and bounds", %{
       catalog: catalog,
       segments_dir: dir
     } do
@@ -529,37 +529,59 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       {:ok, snapshot} = Catalog.register_segments(catalog, @table, [a, b])
       {:ok, schema} = Catalog.table_schema(catalog, @table)
       ids = Schema.field_ids(schema)
+      request = %{sizes: [ids["id"], ids["name"]], bounds: [ids["id"], ids["ts"]]}
 
       assert {:ok, [first, second]} =
-               Catalog.file_column_stats(catalog, @table, snapshot, [ids["id"], ids["name"]])
+               Catalog.file_column_stats(catalog, @table, snapshot, request)
 
       assert Enum.sort([first.path, second.path]) == Enum.sort([a.path, b.path])
       assert Enum.sort([first.rows, second.rows]) == [7, 10]
       assert Enum.sort([first.bytes, second.bytes]) == Enum.sort([a.byte_size, b.byte_size])
 
       for file <- [first, second] do
-        assert Map.keys(file.columns) |> Enum.sort() == Enum.sort([ids["id"], ids["name"]])
-
-        assert %{bytes: id_bytes, min: min, max: max, null_count: 0, nan: false} =
-                 file.columns[ids["id"]]
-
-        assert id_bytes > 0 and file.columns[ids["name"]].bytes > 0
-        assert id_bytes + file.columns[ids["name"]].bytes < file.bytes
+        assert file.column_bytes > 0 and file.column_bytes < file.bytes
+        assert Map.keys(file.bounds) |> Enum.sort() == Enum.sort([ids["id"], ids["ts"]])
+        assert %{min: min, max: max, null_count: 0, nan: nil} = file.bounds[ids["id"]]
         assert String.to_integer(min) < String.to_integer(max)
+        assert %{min: "2026-" <> _, max: "2026-" <> _} = file.bounds[ids["ts"]]
       end
 
-      assert {:ok, bare} = Catalog.file_column_stats(catalog, @table, snapshot, [])
-      assert Enum.map(bare, & &1.columns) == [%{}, %{}]
+      assert {:ok, [only_id | _]} =
+               Catalog.file_column_stats(catalog, @table, snapshot, %{
+                 sizes: [ids["id"]],
+                 bounds: []
+               })
+
+      assert only_id.column_bytes < first.column_bytes and only_id.bounds == %{}
+
+      assert {:ok, bare} =
+               Catalog.file_column_stats(catalog, @table, snapshot, %{sizes: [], bounds: []})
+
+      assert Enum.map(bare, &{&1.column_bytes, &1.bounds}) == [{0, %{}}, {0, %{}}]
 
       {:ok, dropped} = Catalog.drop_segments(catalog, @table, [a.path])
 
       assert {:ok, [%{path: path}]} =
-               Catalog.file_column_stats(catalog, @table, dropped, [ids["id"]])
+               Catalog.file_column_stats(catalog, @table, dropped, %{
+                 sizes: [ids["id"]],
+                 bounds: []
+               })
 
       assert path == b.path
 
       assert {:error, {:invalid_column_ids, _}} =
-               Catalog.file_column_stats(catalog, @table, snapshot, ["name"])
+               Catalog.file_column_stats(catalog, @table, snapshot, %{sizes: ["name"], bounds: []})
+    end
+
+    test "the statement plans in each of its shapes", %{catalog: catalog, segments_dir: dir} do
+      {:ok, snapshot} = Catalog.register_segments(catalog, @table, [write_segment(dir, 1, 3)])
+
+      for {sizes, bounds} <- [{[], []}, {[1, 2], []}, {[], [1]}, {[1], [2, 3]}] do
+        sql = DuckLake.file_column_stats_statement(catalog.config, sizes, bounds)
+
+        assert %{rows: [_ | _]} =
+                 Engine.query!(@engine, "EXPLAIN " <> sql, ["analytics", "events", snapshot])
+      end
     end
   end
 

@@ -215,6 +215,10 @@ defmodule Smolquery.Catalog.DuckLake do
                 "AND t.begin_snapshot <= $3 " <>
                 "AND (t.end_snapshot IS NULL OR t.end_snapshot > $3)"
 
+  @live_file_columns "df.path, df.path_is_relative, " <>
+                       "CAST(COALESCE(df.record_count, 0) AS BIGINT), " <>
+                       "CAST(COALESCE(df.file_size_bytes, 0) AS BIGINT)"
+
   @enforce_keys [:engine, :catalog]
   defstruct [
     :engine,
@@ -831,13 +835,19 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @impl Catalog
-  def file_column_stats(%__MODULE__{} = config, {dataset, table}, snapshot, column_ids)
-      when is_integer(snapshot) and is_list(column_ids) do
+  def file_column_stats(%__MODULE__{} = config, {dataset, table}, snapshot, request)
+      when is_integer(snapshot) and is_map(request) do
+    %{sizes: sizes, bounds: bounds} = request
+
     with {:ok, dataset} <- Identifier.validate(dataset),
          {:ok, table} <- Identifier.validate(table),
-         :ok <- integer_ids(column_ids),
+         :ok <- integer_ids(sizes ++ bounds),
          {:ok, result} <-
-           read(config, &file_column_stats_statement(&1, column_ids), [dataset, table, snapshot]) do
+           read(
+             config,
+             &file_column_stats_statement(&1, sizes, bounds),
+             [dataset, table, snapshot]
+           ) do
       file_column_rows(result.rows)
     end
   end
@@ -850,55 +860,74 @@ defmodule Smolquery.Catalog.DuckLake do
 
   @doc """
   The statement `file_column_stats/4` reads with: every live file at the
-  snapshot, left-joined to its `ducklake_file_column_stats` rows for the
-  given column ids through the `(table_id, data_file_id)` index, one row
-  per file and column, ordered by path then column. A file with no stats
-  for any of the columns is one row of nulls. The ids are integers checked
-  by the caller, so they are literal; with none asked for, the files come
-  alone. Public so a test can `EXPLAIN` it.
+  snapshot with its rows and size, the sum of its `column_size_bytes` for
+  the `sizes` columns as one scalar subquery through the
+  `(table_id, data_file_id)` index, the shape `segment_files_statement/1`
+  settled on (T-696), and a left join to its stats rows for the `bounds`
+  columns, one row per file and bound column, ordered by file then
+  column. With no sizes the sum is zero and with no bounds the file comes
+  alone; the ids are integers checked by the caller, so they are literal.
+  Public so a test can `EXPLAIN` it.
   """
-  @spec file_column_stats_statement(t(), [pos_integer()]) :: String.t()
-  def file_column_stats_statement(%__MODULE__{} = config, []) do
-    "SELECT df.path, df.path_is_relative, " <>
-      "CAST(COALESCE(df.record_count, 0) AS BIGINT), " <>
-      "CAST(COALESCE(df.file_size_bytes, 0) AS BIGINT), " <>
-      "CAST(NULL AS BIGINT), CAST(NULL AS BIGINT), CAST(NULL AS VARCHAR), " <>
-      "CAST(NULL AS VARCHAR), CAST(NULL AS BIGINT), CAST(NULL AS BOOLEAN) " <>
-      "FROM #{live_files_joins(config)} WHERE #{@live_files} ORDER BY df.path"
+  @spec file_column_stats_statement(t(), [pos_integer()], [pos_integer()]) :: String.t()
+  def file_column_stats_statement(%__MODULE__{} = config, sizes, bounds) do
+    stats = meta(config, "ducklake_file_column_stats")
+
+    "SELECT df.data_file_id, #{@live_file_columns}, #{column_bytes_sql(stats, sizes)}, " <>
+      "#{bounds_sql(bounds)} FROM #{live_files_joins(config)} #{bounds_join(stats, bounds)}" <>
+      "WHERE #{@live_files} ORDER BY df.data_file_id#{bounds_order(bounds)}"
   end
 
-  def file_column_stats_statement(%__MODULE__{} = config, column_ids) do
-    ids = Enum.map_join(column_ids, ", ", &Integer.to_string/1)
+  defp column_bytes_sql(_stats, []), do: "CAST(0 AS BIGINT)"
 
-    "SELECT df.path, df.path_is_relative, " <>
-      "CAST(COALESCE(df.record_count, 0) AS BIGINT), " <>
-      "CAST(COALESCE(df.file_size_bytes, 0) AS BIGINT), " <>
-      "CAST(fcs.column_id AS BIGINT), CAST(fcs.column_size_bytes AS BIGINT), " <>
-      "CAST(fcs.min_value AS VARCHAR), CAST(fcs.max_value AS VARCHAR), " <>
-      "CAST(fcs.null_count AS BIGINT), CAST(fcs.contains_nan AS BOOLEAN) " <>
-      "FROM #{live_files_joins(config)} " <>
-      "LEFT JOIN #{meta(config, "ducklake_file_column_stats")} fcs " <>
-      "ON fcs.table_id = df.table_id AND fcs.data_file_id = df.data_file_id " <>
-      "AND fcs.column_id IN (#{ids}) " <>
-      "WHERE #{@live_files} ORDER BY df.path, fcs.column_id"
+  defp column_bytes_sql(stats, sizes) do
+    "CAST(COALESCE((SELECT SUM(s.column_size_bytes) FROM #{stats} s " <>
+      "WHERE s.table_id = df.table_id AND s.data_file_id = df.data_file_id " <>
+      "AND s.column_id IN (#{ids(sizes)})), 0) AS BIGINT)"
   end
+
+  defp bounds_sql([]) do
+    "CAST(NULL AS BIGINT), CAST(NULL AS VARCHAR), CAST(NULL AS VARCHAR), " <>
+      "CAST(NULL AS BIGINT), CAST(NULL AS BOOLEAN)"
+  end
+
+  defp bounds_sql(_bounds) do
+    "CAST(b.column_id AS BIGINT), CAST(b.min_value AS VARCHAR), CAST(b.max_value AS VARCHAR), " <>
+      "CAST(b.null_count AS BIGINT), CAST(b.contains_nan AS BOOLEAN)"
+  end
+
+  defp bounds_join(_stats, []), do: ""
+
+  defp bounds_join(stats, bounds) do
+    "LEFT JOIN #{stats} b ON b.table_id = df.table_id AND b.data_file_id = df.data_file_id " <>
+      "AND b.column_id IN (#{ids(bounds)}) "
+  end
+
+  defp bounds_order([]), do: ""
+  defp bounds_order(_bounds), do: ", b.column_id"
+
+  defp ids(column_ids), do: Enum.map_join(column_ids, ", ", &Integer.to_string/1)
 
   defp file_column_rows(rows) do
-    case Enum.find(rows, fn [_path, relative | _rest] -> relative not in [false, 0] end) do
+    case Enum.find(rows, fn [_id, _path, relative | _rest] -> relative not in [false, 0] end) do
       nil -> {:ok, rows |> Enum.chunk_by(&hd/1) |> Enum.map(&file_column_stat/1)}
-      [path | _rest] -> {:error, {:relative_segment_path, path}}
+      [_id, path | _rest] -> {:error, {:relative_segment_path, path}}
     end
   end
 
-  defp file_column_stat([[path, _relative, rows, bytes | _stats] | _more] = file_rows) do
-    columns =
-      for [_path, _relative, _rows, _bytes, id, size, min, max, nulls, nan] <- file_rows,
-          is_integer(id),
+  defp file_column_stat([[_id, path, _relative, rows, bytes, column_bytes | _] | _] = file_rows) do
+    bounds =
+      for [_id, _path, _relative, _rows, _bytes, _column_bytes, column, min, max, nulls, nan] <-
+            file_rows,
+          is_integer(column),
           into: %{},
-          do: {id, %{bytes: size, min: min, max: max, null_count: nulls, nan: nan in [true, 1]}}
+          do: {column, %{min: min, max: max, null_count: nulls, nan: flag(nan)}}
 
-    %{path: path, rows: rows, bytes: bytes, columns: columns}
+    %{path: path, rows: rows, bytes: bytes, column_bytes: column_bytes, bounds: bounds}
   end
+
+  defp flag(nil), do: nil
+  defp flag(nan), do: nan in [true, 1]
 
   @impl Catalog
   def segment_files(%__MODULE__{} = config, table, :current) do
@@ -945,9 +974,7 @@ defmodule Smolquery.Catalog.DuckLake do
     do: segment_files_statement(config, ~s|df.path COLLATE "C"|)
 
   defp segment_files_statement(config, order) do
-    "SELECT df.path, df.path_is_relative, " <>
-      "CAST(COALESCE(df.record_count, 0) AS BIGINT), " <>
-      "CAST(COALESCE(df.file_size_bytes, 0) AS BIGINT), df.begin_snapshot, " <>
+    "SELECT #{@live_file_columns}, df.begin_snapshot, " <>
       "(SELECT array_agg(fcs.column_id ORDER BY fcs.column_id) " <>
       "FROM #{meta(config, "ducklake_file_column_stats")} fcs " <>
       "WHERE fcs.table_id = df.table_id AND fcs.data_file_id = df.data_file_id) " <>
