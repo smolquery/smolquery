@@ -220,9 +220,9 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
-### Next release: merge shards sized by bytes (T-700)
+### 0.26.0: the merge moves to the peers and to key buckets (T-700, T-701)
 
-**TL;DR.** The tree merge now deals spilled partials into merge shards by bytes, not by a count of sixteen, and stays off when the coordinator's own merge is the cheaper one. The sandbox's `SMOLQUERY_BURST_MERGE_FAN_IN=1` workaround can go.
+**TL;DR.** Spilled runner partials now merge where it is cheap and in one level: merge shards are sized by bytes (128 MiB), the query pods take the first share of every level, and a runner spills its partial split into sixteen buckets by group-key hash so one level finishes every group. The sandbox's `SMOLQUERY_BURST_MERGE_FAN_IN=1` workaround must go, or no merge level runs. Query pods now write to the sealed bucket under the spill prefix, so their role needs `s3:PutObject` there.
 
 - **Why.** The 0.25.4 rerun of the 92 GB bench (T-683) showed a merge shard on a 10 GB Lambda re-aggregating at about 65 MB/s, a fifth of the coordinator's rate. Sixteen 85 MB partials made a 15 to 21 s shard at 25 runners and the three spilling shapes lost 2 to 18 s per job; only 100 runners broke even.
 - **`SMOLQUERY_BURST_MERGE_TARGET_BYTES` (`134217728`, 128 MiB)** sizes a merge shard the way `SMOLQUERY_BURST_TARGET_BYTES` sizes a scan shard, about 2 s of work; `SMOLQUERY_BURST_MERGE_FAN_IN` (`16`) is now only a cap on a shard's inputs.
