@@ -133,6 +133,37 @@ defmodule Smolquery.QueryService.PlannerIntegrationTest do
     assert run(names).rows |> length() == 90
   end
 
+  test "a bound on a sorted column prunes sealed files, and the statistics count only the kept ones (T-705)",
+       %{catalog: catalog, runtime: runtime, tmp_dir: tmp} do
+    seal_rows(catalog, Path.join(tmp, "segments"), 1..50)
+    seal_rows(catalog, Path.join(tmp, "segments"), 51..100)
+    {:ok, [low, high]} = Catalog.segment_files(catalog, @table, :current)
+
+    whole = planned(runtime, "SELECT name FROM analytics.events WHERE id > 0")
+    upper = planned(runtime, "SELECT name FROM analytics.events WHERE id > 60")
+    none = planned(runtime, "SELECT name FROM analytics.events WHERE id > 1000")
+    all = planned(runtime, "SELECT * FROM analytics.events WHERE id >= 100")
+
+    assert %{files_total: 2, files_scanned: 1, rows_scanned: 50} = upper.statistics.sealed
+    assert upper.statistics.sealed.file_bytes == high.bytes
+    assert upper.statistics.sealed.bytes_scanned < high.bytes
+    assert upper.statistics.sealed.bytes_scanned < whole.statistics.sealed.bytes_scanned
+    assert upper.statistics.sealed.bytes_scanned > div(whole.statistics.sealed.bytes_scanned, 3)
+    assert %{files_scanned: 2} = whole.statistics.sealed
+    assert upper.sealed_skipped[@table] == MapSet.new([low.path])
+    assert Enum.count(run(upper).rows) == 40
+
+    assert %{files_total: 2, files_scanned: 0, rows_scanned: 0, bytes_scanned: 0, file_bytes: 0} =
+             none.statistics.sealed
+
+    assert none.sealed_skipped[@table] == MapSet.new([low.path, high.path])
+    assert run(none).rows == []
+
+    assert %{files_scanned: 1, bytes_scanned: bytes, file_bytes: bytes} = all.statistics.sealed
+    assert bytes == high.bytes
+    assert Enum.count(run(all).rows) == 1
+  end
+
   test "a partitioned table's hot tier reads as one (T-170)", %{
     catalog: catalog,
     buffer: buffer,

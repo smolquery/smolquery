@@ -116,8 +116,10 @@ defmodule Smolquery.QueryService.Scatter do
   ## PoC limits
 
   Consistency holds — the sealed list is pinned to the plan's snapshot and
-  the hot list is the plan's own — but sealed-tier min/max pruning is lost:
-  DuckLake prunes only queries it plans itself. Shards balance by file
+  the hot list is the plan's own. Sealed files the planner pruned by their
+  catalog bounds (`Plan.sealed_skipped`, T-705) are not dealt; files only
+  DuckLake would prune, on a string or decimal bound, still are, and the
+  shard's engine prunes their row groups itself. Shards balance by file
   count, not bytes. Partials travel as whole parquet binaries over gen_rpc,
   off the distribution channel (T-364). Remote workers must reach the same
   sealed store, which in practice means S3 or a shared disk.
@@ -312,9 +314,12 @@ defmodule Smolquery.QueryService.Scatter do
         |> Map.get(ref, [])
         |> Enum.map(&(&1 |> Map.take(["url", "field_ids"]) |> Map.put("hot", true)))
 
+      skipped = Map.get(plan.sealed_skipped, ref, MapSet.new())
+
       units =
-        Enum.map(sealed, &%{"url" => &1.path, "snapshot" => &1.snapshot, "bytes" => &1.bytes}) ++
-          hot
+        for file <- sealed, not MapSet.member?(skipped, file.path) do
+          %{"url" => file.path, "snapshot" => file.snapshot, "bytes" => file.bytes}
+        end ++ hot
 
       if length(units) >= runtime.distributed.min_files do
         {:ok, units}
