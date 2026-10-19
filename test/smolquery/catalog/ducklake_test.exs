@@ -519,6 +519,50 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     end
   end
 
+  describe "file_column_stats/4 (T-704)" do
+    test "gives each live file its rows, size, and the asked columns' bytes and bounds", %{
+      catalog: catalog,
+      segments_dir: dir
+    } do
+      a = write_segment(dir, 1, 10)
+      b = write_segment(dir, 2, 7)
+      {:ok, snapshot} = Catalog.register_segments(catalog, @table, [a, b])
+      {:ok, schema} = Catalog.table_schema(catalog, @table)
+      ids = Schema.field_ids(schema)
+
+      assert {:ok, [first, second]} =
+               Catalog.file_column_stats(catalog, @table, snapshot, [ids["id"], ids["name"]])
+
+      assert Enum.sort([first.path, second.path]) == Enum.sort([a.path, b.path])
+      assert Enum.sort([first.rows, second.rows]) == [7, 10]
+      assert Enum.sort([first.bytes, second.bytes]) == Enum.sort([a.byte_size, b.byte_size])
+
+      for file <- [first, second] do
+        assert Map.keys(file.columns) |> Enum.sort() == Enum.sort([ids["id"], ids["name"]])
+
+        assert %{bytes: id_bytes, min: min, max: max, null_count: 0, nan: false} =
+                 file.columns[ids["id"]]
+
+        assert id_bytes > 0 and file.columns[ids["name"]].bytes > 0
+        assert id_bytes + file.columns[ids["name"]].bytes < file.bytes
+        assert String.to_integer(min) < String.to_integer(max)
+      end
+
+      assert {:ok, bare} = Catalog.file_column_stats(catalog, @table, snapshot, [])
+      assert Enum.map(bare, & &1.columns) == [%{}, %{}]
+
+      {:ok, dropped} = Catalog.drop_segments(catalog, @table, [a.path])
+
+      assert {:ok, [%{path: path}]} =
+               Catalog.file_column_stats(catalog, @table, dropped, [ids["id"]])
+
+      assert path == b.path
+
+      assert {:error, {:invalid_column_ids, _}} =
+               Catalog.file_column_stats(catalog, @table, snapshot, ["name"])
+    end
+  end
+
   describe "segment_files/3" do
     test "lists each segment's path, rows, and bytes", %{
       catalog: catalog,

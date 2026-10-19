@@ -711,14 +711,16 @@ defmodule Smolquery.QueryService.PlannerTest do
                files_total: 2,
                files_scanned: 1,
                rows_scanned: 7,
-               bytes_scanned: 70
+               bytes_scanned: 70,
+               file_bytes: 70
              }
 
       assert plan.statistics.sealed == %{
                files_total: 3,
                files_scanned: 3,
                rows_scanned: 1_000,
-               bytes_scanned: 4_096
+               bytes_scanned: 4_096,
+               file_bytes: 4_096
              }
     end
 
@@ -737,7 +739,8 @@ defmodule Smolquery.QueryService.PlannerTest do
                files_total: 0,
                files_scanned: 0,
                rows_scanned: 0,
-               bytes_scanned: 0
+               bytes_scanned: 0,
+               file_bytes: 0
              }
     end
 

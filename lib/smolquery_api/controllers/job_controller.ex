@@ -213,6 +213,7 @@ defmodule SmolqueryApi.JobController do
       "rowsScanned" => Statistics.rows_scanned(statistics),
       "bytesScanned" => Statistics.bytes_scanned(statistics),
       "mibScanned" => Statistics.mib_scanned(statistics),
+      "fileBytes" => Statistics.file_bytes(statistics),
       "hot" => tier_json(statistics.hot),
       "sealed" => tier_json(statistics.sealed)
     }
@@ -223,7 +224,8 @@ defmodule SmolqueryApi.JobController do
       "filesTotal" => tier.files_total,
       "filesScanned" => tier.files_scanned,
       "rowsScanned" => tier.rows_scanned,
-      "bytesScanned" => tier.bytes_scanned
+      "bytesScanned" => tier.bytes_scanned,
+      "fileBytes" => tier.file_bytes
     }
   end
 

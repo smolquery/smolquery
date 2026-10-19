@@ -346,7 +346,8 @@ defmodule SmolqueryWeb.QueryLive.Index do
   defp running?(job), do: not QueryService.Job.terminal?(job)
 
   defp statistics_line(statistics) do
-    "scanned #{Statistics.mib_scanned(statistics)} MiB · " <>
+    "scanned #{Statistics.mib_scanned(statistics)} MiB " <>
+      "of #{Statistics.mib_in_files(statistics)} MiB in files · " <>
       "#{Statistics.rows_scanned(statistics)} rows · " <>
       "#{Statistics.files_scanned(statistics)}/#{Statistics.files_total(statistics)} files " <>
       "(hot #{statistics.hot.files_scanned}/#{statistics.hot.files_total}, " <>

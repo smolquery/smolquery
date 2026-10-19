@@ -81,6 +81,11 @@ defmodule Smolquery.QueryService.PlannerIntegrationTest do
     snapshot
   end
 
+  defp planned(runtime, sql) do
+    {:ok, plan} = Planner.plan(runtime, Engine.connection_name(@job), sql)
+    plan
+  end
+
   defp run(plan) do
     Enum.each(plan.statements, &Engine.query!(@job, &1))
 
@@ -102,6 +107,30 @@ defmodule Smolquery.QueryService.PlannerIntegrationTest do
       Planner.plan(runtime, Engine.connection_name(@job), "SELECT count(*) FROM analytics.events")
 
     assert run(plan).rows == [[5]]
+  end
+
+  test "bytes scanned are the referenced columns' bytes, file bytes the whole files (T-704)", %{
+    catalog: catalog,
+    runtime: runtime,
+    tmp_dir: tmp
+  } do
+    seal_rows(catalog, Path.join(tmp, "segments"), 1..50)
+    seal_rows(catalog, Path.join(tmp, "segments"), 51..100)
+
+    count = planned(runtime, "SELECT count(*) FROM analytics.events")
+    names = planned(runtime, "SELECT name FROM analytics.events WHERE id > 10")
+    star = planned(runtime, "SELECT * FROM analytics.events")
+
+    assert count.statistics.sealed.files_scanned == 2
+    assert count.statistics.sealed.bytes_scanned == 0
+    assert count.statistics.sealed.file_bytes > 0
+
+    assert names.statistics.sealed.file_bytes == count.statistics.sealed.file_bytes
+    assert names.statistics.sealed.bytes_scanned > 0
+    assert names.statistics.sealed.bytes_scanned < names.statistics.sealed.file_bytes
+
+    assert star.statistics.sealed.bytes_scanned == star.statistics.sealed.file_bytes
+    assert run(names).rows |> length() == 90
   end
 
   test "a partitioned table's hot tier reads as one (T-170)", %{

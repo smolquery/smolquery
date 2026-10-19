@@ -23,6 +23,15 @@ defmodule Smolquery.QueryService.Statistics do
   Rows and bytes sum over the scanned files' manifest and catalog stats. They
   are plan-derived sizes, not engine-measured I/O — `EXPLAIN ANALYZE` is the
   tool for the latter.
+
+  `bytes_scanned` is what the query reads of those files: the bytes of the
+  columns it references, from the catalog's per-file column stats (T-704),
+  since Parquet is columnar and the engine reads only those chunks. That
+  is the number a bill is made of, as BigQuery's bytes processed is.
+  `file_bytes` is the files' whole size, the upper bound `bytes_scanned`
+  was cut from; the two are equal on a `SELECT *`, on the hot tier (whose
+  micro-segments are small and served whole by their buffer pod), and on a
+  catalog without per-column sizes.
   """
 
   @enforce_keys [:hot, :sealed]
@@ -30,13 +39,15 @@ defmodule Smolquery.QueryService.Statistics do
 
   @typedoc """
   One tier's scan counts: files the planner considered, files the plan keeps,
-  and the kept files' total rows and bytes.
+  the kept files' total rows, the bytes the query reads of them, and their
+  whole size.
   """
   @type tier :: %{
           files_total: non_neg_integer(),
           files_scanned: non_neg_integer(),
           rows_scanned: non_neg_integer(),
-          bytes_scanned: non_neg_integer()
+          bytes_scanned: non_neg_integer(),
+          file_bytes: non_neg_integer()
         }
 
   @type t :: %__MODULE__{hot: tier(), sealed: tier()}
@@ -48,16 +59,23 @@ defmodule Smolquery.QueryService.Statistics do
   def new(hot, sealed), do: %__MODULE__{hot: hot, sealed: sealed}
 
   @doc """
-  One tier's counts as a `t:tier/0`.
+  One tier's counts as a `t:tier/0`; `file_bytes` is `bytes_scanned` when
+  not given, for a tier read whole.
   """
-  @spec tier(non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ::
-          tier()
-  def tier(files_total, files_scanned, rows_scanned, bytes_scanned) do
+  @spec tier(
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer() | nil
+        ) :: tier()
+  def tier(files_total, files_scanned, rows_scanned, bytes_scanned, file_bytes \\ nil) do
     %{
       files_total: files_total,
       files_scanned: files_scanned,
       rows_scanned: rows_scanned,
-      bytes_scanned: bytes_scanned
+      bytes_scanned: bytes_scanned,
+      file_bytes: file_bytes || bytes_scanned
     }
   end
 
@@ -88,6 +106,19 @@ defmodule Smolquery.QueryService.Statistics do
   @spec bytes_scanned(t()) :: non_neg_integer()
   def bytes_scanned(%__MODULE__{hot: hot, sealed: sealed}),
     do: hot.bytes_scanned + sealed.bytes_scanned
+
+  @doc """
+  The whole size of the files the plan reads, both tiers.
+  """
+  @spec file_bytes(t()) :: non_neg_integer()
+  def file_bytes(%__MODULE__{hot: hot, sealed: sealed}), do: hot.file_bytes + sealed.file_bytes
+
+  @doc """
+  `file_bytes/1` in MiB, rounded to two decimals.
+  """
+  @spec mib_in_files(t()) :: float()
+  def mib_in_files(%__MODULE__{} = statistics),
+    do: Float.round(file_bytes(statistics) / 1_048_576, 2)
 
   @doc """
   `bytes_scanned/1` in MiB, rounded to two decimals.

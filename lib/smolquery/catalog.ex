@@ -111,6 +111,31 @@ defmodule Smolquery.Catalog do
         }
 
   @typedoc """
+  What the catalog knows of one column in one file: the bytes its chunks
+  take, its bounds as the catalog prints them, its nulls, and whether a
+  float column holds a NaN; any of them `nil` when the catalog did not
+  record it.
+  """
+  @type column_stats :: %{
+          bytes: non_neg_integer() | nil,
+          min: String.t() | nil,
+          max: String.t() | nil,
+          null_count: non_neg_integer() | nil,
+          nan: boolean() | nil
+        }
+
+  @typedoc """
+  One live file with its rows and size, and `t:column_stats/0` for the
+  column ids asked for that the file has stats for.
+  """
+  @type file_column_stats :: %{
+          path: String.t(),
+          rows: non_neg_integer(),
+          bytes: non_neg_integer(),
+          columns: %{pos_integer() => column_stats()}
+        }
+
+  @typedoc """
   One sealed segment's path and weight, for `segment_files/3`, and the
   snapshot it was registered at — which bounds the columns it can hold: a
   column that began after that snapshot cannot be in the file, whatever the
@@ -160,6 +185,8 @@ defmodule Smolquery.Catalog do
               {:ok, segment_stats()} | {:error, term()}
   @callback segment_files(config :: term(), table_ref(), snapshot() | :current) ::
               {:ok, [segment_file()]} | {:error, term()}
+  @callback file_column_stats(config :: term(), table_ref(), snapshot(), [pos_integer()]) ::
+              {:ok, [file_column_stats()]} | {:error, term()}
   @callback drop_segments(config :: term(), table_ref(), [String.t()]) ::
               {:ok, snapshot()} | {:error, term()}
   @callback replace_segments(config :: term(), table_ref(), [Segment.t()], [String.t()]) ::
@@ -191,7 +218,8 @@ defmodule Smolquery.Catalog do
   @callback list_connections(config :: term()) :: {:ok, [Connection.t()]} | {:error, term()}
   @callback delete_connection(config :: term(), name :: String.t()) :: :ok | {:error, term()}
 
-  @optional_callbacks put_table_options: 3,
+  @optional_callbacks file_column_stats: 4,
+                      put_table_options: 3,
                       alter_table: 3,
                       schema_version: 1,
                       on_connection: 2,
@@ -313,6 +341,26 @@ defmodule Smolquery.Catalog do
           {:ok, segment_stats()} | {:error, term()}
   def segment_stats(%__MODULE__{} = catalog, table, snapshot),
     do: call(catalog, :segment_stats, [table, snapshot])
+
+  @doc """
+  Every live file at `snapshot` with its rows and size, and the catalog's
+  stats for `column_ids` in it: the bytes each column's chunks take, which
+  is what a query that reads those columns scans (T-704) where
+  `segment_stats/3` sums whole files, and the bounds a planner prunes
+  files by. A catalog without per-column stats answers
+  `{:error, :file_column_stats_unsupported}`, and the caller falls back to
+  whole files.
+  """
+  @spec file_column_stats(t(), table_ref(), snapshot(), [pos_integer()]) ::
+          {:ok, [file_column_stats()]} | {:error, term()}
+  def file_column_stats(%__MODULE__{} = catalog, table, snapshot, column_ids) do
+    dispatch(
+      catalog,
+      :file_column_stats,
+      [table, snapshot, column_ids],
+      :file_column_stats_unsupported
+    )
+  end
 
   @doc """
   Each segment's path, rows, and bytes at `snapshot` — `segment_stats/3` per
@@ -648,11 +696,11 @@ defmodule Smolquery.Catalog do
     )
   end
 
-  defp dispatch(catalog, function, args) do
+  defp dispatch(catalog, function, args, unsupported \\ :connections_unsupported) do
     if function_exported?(catalog.impl, function, length(args) + 1) do
       call(catalog, function, args)
     else
-      {:error, :connections_unsupported}
+      {:error, unsupported}
     end
   end
 

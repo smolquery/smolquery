@@ -831,6 +831,76 @@ defmodule Smolquery.Catalog.DuckLake do
   end
 
   @impl Catalog
+  def file_column_stats(%__MODULE__{} = config, {dataset, table}, snapshot, column_ids)
+      when is_integer(snapshot) and is_list(column_ids) do
+    with {:ok, dataset} <- Identifier.validate(dataset),
+         {:ok, table} <- Identifier.validate(table),
+         :ok <- integer_ids(column_ids),
+         {:ok, result} <-
+           read(config, &file_column_stats_statement(&1, column_ids), [dataset, table, snapshot]) do
+      file_column_rows(result.rows)
+    end
+  end
+
+  defp integer_ids(column_ids) do
+    if Enum.all?(column_ids, &is_integer/1),
+      do: :ok,
+      else: {:error, {:invalid_column_ids, column_ids}}
+  end
+
+  @doc """
+  The statement `file_column_stats/4` reads with: every live file at the
+  snapshot, left-joined to its `ducklake_file_column_stats` rows for the
+  given column ids through the `(table_id, data_file_id)` index, one row
+  per file and column, ordered by path then column. A file with no stats
+  for any of the columns is one row of nulls. The ids are integers checked
+  by the caller, so they are literal; with none asked for, the files come
+  alone. Public so a test can `EXPLAIN` it.
+  """
+  @spec file_column_stats_statement(t(), [pos_integer()]) :: String.t()
+  def file_column_stats_statement(%__MODULE__{} = config, []) do
+    "SELECT df.path, df.path_is_relative, " <>
+      "CAST(COALESCE(df.record_count, 0) AS BIGINT), " <>
+      "CAST(COALESCE(df.file_size_bytes, 0) AS BIGINT), " <>
+      "CAST(NULL AS BIGINT), CAST(NULL AS BIGINT), CAST(NULL AS VARCHAR), " <>
+      "CAST(NULL AS VARCHAR), CAST(NULL AS BIGINT), CAST(NULL AS BOOLEAN) " <>
+      "FROM #{live_files_joins(config)} WHERE #{@live_files} ORDER BY df.path"
+  end
+
+  def file_column_stats_statement(%__MODULE__{} = config, column_ids) do
+    ids = Enum.map_join(column_ids, ", ", &Integer.to_string/1)
+
+    "SELECT df.path, df.path_is_relative, " <>
+      "CAST(COALESCE(df.record_count, 0) AS BIGINT), " <>
+      "CAST(COALESCE(df.file_size_bytes, 0) AS BIGINT), " <>
+      "CAST(fcs.column_id AS BIGINT), CAST(fcs.column_size_bytes AS BIGINT), " <>
+      "CAST(fcs.min_value AS VARCHAR), CAST(fcs.max_value AS VARCHAR), " <>
+      "CAST(fcs.null_count AS BIGINT), CAST(fcs.contains_nan AS BOOLEAN) " <>
+      "FROM #{live_files_joins(config)} " <>
+      "LEFT JOIN #{meta(config, "ducklake_file_column_stats")} fcs " <>
+      "ON fcs.table_id = df.table_id AND fcs.data_file_id = df.data_file_id " <>
+      "AND fcs.column_id IN (#{ids}) " <>
+      "WHERE #{@live_files} ORDER BY df.path, fcs.column_id"
+  end
+
+  defp file_column_rows(rows) do
+    case Enum.find(rows, fn [_path, relative | _rest] -> relative not in [false, 0] end) do
+      nil -> {:ok, rows |> Enum.chunk_by(&hd/1) |> Enum.map(&file_column_stat/1)}
+      [path | _rest] -> {:error, {:relative_segment_path, path}}
+    end
+  end
+
+  defp file_column_stat([[path, _relative, rows, bytes | _stats] | _more] = file_rows) do
+    columns =
+      for [_path, _relative, _rows, _bytes, id, size, min, max, nulls, nan] <- file_rows,
+          is_integer(id),
+          into: %{},
+          do: {id, %{bytes: size, min: min, max: max, null_count: nulls, nan: nan in [true, 1]}}
+
+    %{path: path, rows: rows, bytes: bytes, columns: columns}
+  end
+
+  @impl Catalog
   def segment_files(%__MODULE__{} = config, table, :current) do
     with {:ok, snapshot} <- current_snapshot(config), do: segment_files(config, table, snapshot)
   end
