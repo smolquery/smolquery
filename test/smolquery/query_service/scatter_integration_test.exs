@@ -46,6 +46,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   alias Smolquery.Segments.Store
   alias Smolquery.Segments.Store.Local
   alias Smolquery.Test.FileCacheFixture
+  alias Smolquery.Test.FlakyStore
   alias Smolquery.Test.SegmentFixture
 
   @moduletag :integration
@@ -149,6 +150,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     pool = :"scatter_burst_pool_#{:erlang.unique_integer([:positive])}"
     {dead, opts} = Keyword.pop(opts, :dead, false)
     {spill, opts} = Keyword.pop(opts, :spill, false)
+    {flaky, opts} = Keyword.pop(opts, :flaky, %{})
     max = Keyword.get(opts, :max, 2)
 
     unless dead do
@@ -161,13 +163,16 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     burst = [burst: Keyword.merge([enabled: true, pool: pool, max: max], opts)]
 
     if spill,
-      do: [{:store, seed_store(tmp_dir)} | burst],
+      do: [{:store, spill_store(tmp_dir, flaky)} | burst],
       else: burst
   end
 
   defp burst(_context), do: []
 
   defp seed_store(tmp_dir), do: Local.new(dir: Path.join(tmp_dir, "seg"))
+
+  defp spill_store(tmp_dir, failures) when failures == %{}, do: seed_store(tmp_dir)
+  defp spill_store(tmp_dir, failures), do: FlakyStore.new(seed_store(tmp_dir), failures)
 
   defp attach_shard_decisions do
     parent = self()
@@ -869,6 +874,109 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert {:ok, []} = Store.list(seed_store(tmp_dir), "burst-partials")
 
     {tree, merges}
+  end
+
+  @tag burst: [
+         max: 4,
+         spill: true,
+         spill_inline_max_bytes: 0,
+         merge_min_bytes: 0,
+         merge_target_bytes: 1,
+         merge_partitions: 2,
+         merge_peer_weight: 0,
+         flaky: %{"/7.parquet" => 1}
+       ]
+  test "a runner merge shard whose spill the store refuses is retried on a peer, and the level answers whole (T-703)",
+       context do
+    job = flaky_level(context)
+
+    assert %{outcome: :ok, levels: 1, shards: 2, failed_shards: 0} = tree_merge(job).meta
+    assert [failed] = merge_shards(job, &Map.has_key?(&1.meta, :error))
+    assert %{kind: :runner, shard: 7, merge_level: 1} = failed.meta
+
+    assert [retried] = merge_shards(job, &Map.get(&1.meta, :retry, false))
+    assert %{kind: :peer, shard: 7, merge_level: 1, spilled: true, rows: rows} = retried.meta
+    assert rows > 0 and retried.meta.node in scan_peers(job)
+  end
+
+  @tag burst: [
+         max: 4,
+         spill: true,
+         spill_inline_max_bytes: 0,
+         merge_min_bytes: 0,
+         merge_target_bytes: 1,
+         merge_partitions: 2,
+         merge_peer_weight: 1,
+         flaky: %{"/7.parquet" => 1}
+       ]
+  test "a peer merge shard whose spill the store refuses is retried on another peer (T-703)",
+       context do
+    job = flaky_level(context)
+
+    assert %{outcome: :ok, levels: 1, shards: 2, peer_shards: 2, failed_shards: 0} =
+             tree_merge(job).meta
+
+    assert [failed] = merge_shards(job, &Map.has_key?(&1.meta, :error))
+    assert [retried] = merge_shards(job, &Map.get(&1.meta, :retry, false))
+    assert %{kind: :peer, shard: 7} = failed.meta
+    assert %{kind: :peer, shard: 7, spilled: true, rows: rows} = retried.meta
+    assert rows > 0
+  end
+
+  @tag burst: [
+         max: 4,
+         spill: true,
+         spill_inline_max_bytes: 0,
+         merge_min_bytes: 0,
+         merge_target_bytes: 1,
+         merge_partitions: 2,
+         merge_peer_weight: 0,
+         flaky: %{"/7.parquet" => :infinity}
+       ]
+  test "a merge shard that fails twice leaves only its own inputs to the coordinator, and the other shards stand (T-703)",
+       context do
+    job = flaky_level(context)
+
+    assert %{outcome: :partial, levels: 1, shards: 2, failed_shards: 1, consumed: consumed} =
+             tree_merge(job).meta
+
+    assert consumed > 0 and tree_merge(job).meta.left_bytes > 0
+    assert [_runner, _peer] = merge_shards(job, &Map.has_key?(&1.meta, :error))
+    assert [_answered] = merge_shards(job, &Map.has_key?(&1.meta, :rows))
+  end
+
+  defp flaky_level(%{
+         control: control,
+         distributed: distributed,
+         tmp_dir: tmp_dir,
+         catalog: catalog
+       }) do
+    seal_seventh(catalog, tmp_dir)
+    sql = "SELECT id, count(*) AS c FROM analytics.events GROUP BY id ORDER BY id"
+
+    assert {:ok, %{state: :done} = job, frame} =
+             Client.query(distributed, sql, burst: 4, trace: true)
+
+    assert {:ok, %{state: :done}, control_frame} = Client.query(control, sql)
+    assert DataFrame.names(control_frame) == DataFrame.names(frame)
+    assert_columns(DataFrame.to_columns(control_frame), DataFrame.to_columns(frame))
+
+    assert %{peers: 3, burst: 4} = job.scatter
+    assert {:ok, []} = Store.list(seed_store(tmp_dir), "burst-partials")
+
+    job
+  end
+
+  defp tree_merge(job) do
+    assert [tree] = Enum.filter(job.trace, &(&1.name == :tree_merge))
+    tree
+  end
+
+  defp merge_shards(job, chosen?) do
+    Enum.filter(
+      job.trace,
+      &(&1.name == :shard and Map.has_key?(&1.meta, :merge_level) and chosen?.(&1))
+    )
   end
 
   @tag burst: [max: 4, spill: true, spill_inline_max_bytes: 0, merge_fan_in: 2]

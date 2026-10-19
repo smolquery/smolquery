@@ -95,11 +95,18 @@ defmodule Smolquery.QueryService.Scatter do
      a runner that went silent after uploading some of its buckets left
      objects nothing else names. A merge shard is a `shard` span
      with `merge_level` and `inputs`, and the levels sit under one
-     `tree_merge` span. A merge shard is not retried on a peer, since a
-     peer's request has no spill and its partial would come back inline:
-     a level that fails leaves its inputs where they are and the
-     coordinator merges them itself, as before the tree. A failure
-     anywhere after a level has landed sweeps the job's whole spill prefix.
+     `tree_merge` span. A merge shard that fails, on a runner or on a
+     peer, is retried once on a peer, another than the one it failed on
+     when there is one, while the retry floor of the deadline remains
+     (T-703): a peer merge
+     shard spills through its own store, so a peer answers a merge as a
+     runner would. A level waits for every shard, and a shard that failed
+     twice leaves only its own inputs to the coordinator; the shards that
+     answered are kept, since the final re-aggregates whatever it reads,
+     so the final takes the shrunk outputs plus the failed shards' inputs
+     and never a whole level's bucket files. A level that failed is the
+     last; the `tree_merge` outcome is `:partial`. A failure anywhere after
+     a level has landed sweeps the job's whole spill prefix.
 
   ## PoC limits
 
@@ -581,7 +588,12 @@ defmodule Smolquery.QueryService.Scatter do
       ordered: false,
       timeout: :infinity
     )
-    |> collect(context, dir)
+    |> collect(context, dir, :halt)
+    |> case do
+      {:ok, partials, []} -> {:ok, partials}
+      {:ok, _partials, [{_target, reason} | _more]} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp fan_in(%{runner_base: nil}, _dir, partials), do: {partials, []}
@@ -598,6 +610,7 @@ defmodule Smolquery.QueryService.Scatter do
               level: 1,
               shards: 0,
               peer_shards: 0,
+              failed: 0,
               partitioned: false,
               consumed: [],
               spilled_bytes: spilled_bytes(partials),
@@ -665,14 +678,14 @@ defmodule Smolquery.QueryService.Scatter do
   defp levels(context, dir, {shards, kept}, stats) do
     grouped = Enum.flat_map(shards, &elem(&1, 1))
     stats = %{stats | partitioned: Enum.any?(grouped, &Map.has_key?(&1, :partition))}
-    descend(context, dir, {grouped, kept}, merge_targets(shards, context, stats), stats)
+    descend(context, dir, {merge_targets(shards, context, stats), kept}, stats)
   end
 
   defp merge_targets(shards, %{runtime: %Runtime{burst: %{pool: pool}}}, stats) do
     Enum.with_index(shards, fn {host, group}, offset ->
       merge = %{level: stats.level, locations: Enum.flat_map(group, &paths/1)}
       merge = if stats.partitioned, do: Map.put(merge, :partitions, length(group)), else: merge
-      {merge_target(host, pool, stats.next_index + offset, merge), []}
+      {merge_target(host, pool, stats.next_index + offset, merge), group}
     end)
   end
 
@@ -682,12 +695,26 @@ defmodule Smolquery.QueryService.Scatter do
   defp merge_target({:peer, peer}, _pool, index, merge),
     do: Map.merge(peer, %{index: index, merge: merge})
 
-  defp descend(%{runtime: runtime} = context, dir, {grouped, kept}, targets, stats) do
+  defp descend(%{runtime: runtime} = context, dir, {targets, kept}, stats) do
+    grouped = groups(targets)
+
     case level(context, dir, targets) do
-      {:ok, merged} ->
-        stats = advanced(stats, targets, Enum.flat_map(grouped, &keys/1))
+      {:ok, merged, []} ->
+        stats = advanced(stats, targets, Enum.flat_map(grouped, &keys/1), 0)
         bytes = {Enum.sum_by(grouped, & &1.bytes), Enum.sum_by(merged, & &1.bytes)}
         next_level(context, dir, kept ++ merged, bytes, stats)
+
+      {:ok, merged, [{_target, reason} | _more] = failed} ->
+        Logger.warning(
+          "tree merge level #{stats.level}: #{length(failed)} of #{length(targets)} shards " <>
+            "left their inputs to the coordinator: #{inspect(reason)}"
+        )
+
+        lost = Enum.map(failed, fn {target, _reason} -> target.index end)
+        {lost, done} = Enum.split_with(targets, fn {target, _group} -> target.index in lost end)
+        stats = advanced(stats, targets, Enum.flat_map(groups(done), &keys/1), length(failed))
+        inputs = kept ++ merged ++ Enum.map(groups(lost), &as_partial/1)
+        {inputs, settled(stats, :partial, inputs)}
 
       {:error, reason} ->
         Logger.warning(
@@ -696,12 +723,20 @@ defmodule Smolquery.QueryService.Scatter do
 
         delete_spilled(
           runtime,
-          for({target, _files} <- targets, do: spill_key(runtime, context.job_id, target.index))
+          for({target, _group} <- targets, do: spill_key(runtime, context.job_id, target.index))
         )
 
         {kept ++ grouped, settled(stats, :error, kept ++ grouped)}
     end
   end
+
+  defp groups(targets), do: Enum.flat_map(targets, &elem(&1, 1))
+
+  defp as_partial(%{parts: [first | _more] = parts, bytes: bytes} = bucket)
+       when not is_map_key(bucket, :spilled),
+       do: partial(nil, first.key, bytes, parts)
+
+  defp as_partial(partial), do: partial
 
   defp next_level(context, dir, partials, {bytes_in, bytes_out}, stats) do
     with false <- stats.partitioned,
@@ -721,7 +756,7 @@ defmodule Smolquery.QueryService.Scatter do
     })
   end
 
-  defp advanced(stats, targets, consumed) do
+  defp advanced(stats, targets, consumed, failed) do
     shards = length(targets)
 
     %{
@@ -729,6 +764,7 @@ defmodule Smolquery.QueryService.Scatter do
       | level: stats.level + 1,
         shards: stats.shards + shards,
         peer_shards: stats.peer_shards + Enum.count(targets, &(elem(&1, 0).kind == :peer)),
+        failed: stats.failed + failed,
         consumed: stats.consumed ++ consumed,
         next_index: stats.next_index + shards
     }
@@ -736,12 +772,12 @@ defmodule Smolquery.QueryService.Scatter do
 
   defp level(%{runtime: runtime} = context, dir, targets) do
     targets
-    |> Task.async_stream(fn {target, files} -> shard(target, files, context) end,
+    |> Task.async_stream(fn {target, _group} -> shard(target, [], context) end,
       max_concurrency: min(length(targets), runtime.burst.max_inflight),
       ordered: false,
       timeout: :infinity
     )
-    |> collect(context, dir)
+    |> collect(context, dir, :cont)
   end
 
   defp tree_meta({_inputs, %{outcome: outcome, levels: levels, shards: shards} = stats}) do
@@ -750,6 +786,7 @@ defmodule Smolquery.QueryService.Scatter do
       levels: levels,
       shards: shards,
       peer_shards: stats.peer_shards,
+      failed_shards: stats.failed,
       partitioned: stats.partitioned,
       consumed: length(stats.consumed),
       spilled_bytes: stats.spilled_bytes,
@@ -759,10 +796,10 @@ defmodule Smolquery.QueryService.Scatter do
 
   defp tree_meta(raised), do: %{outcome: :error, error: error_text(raised)}
 
-  defp collect(results, %{runtime: runtime}, partials_dir) do
+  defp collect(results, %{runtime: runtime}, partials_dir, on_failure) do
     results
-    |> Enum.reduce_while({:ok, []}, fn
-      {:ok, {target, wait_us, {:ok, reply}}}, {:ok, partials} ->
+    |> Enum.reduce_while({[], []}, fn
+      {:ok, {target, wait_us, {:ok, reply}}}, {partials, failed} ->
         partial =
           reply
           |> landed(partials_dir, target.index)
@@ -773,17 +810,17 @@ defmodule Smolquery.QueryService.Scatter do
             wait_us: wait_us
           })
 
-        {:cont, {:ok, [partial | partials]}}
+        {:cont, {[partial | partials], failed}}
 
-      {:ok, {_target, _wait_us, {:error, reason}}}, _acc ->
-        {:halt, {:error, reason}}
+      {:ok, {target, _wait_us, {:error, reason}}}, {partials, failed} ->
+        {on_failure, {partials, [{target, reason} | failed]}}
 
       {:exit, reason}, _acc ->
         {:halt, {:error, reason}}
     end)
     |> case do
-      {:ok, partials} -> {:ok, Enum.reverse(partials)}
       {:error, reason} -> {:error, reason}
+      {partials, failed} -> {:ok, Enum.reverse(partials), Enum.reverse(failed)}
     end
   end
 
@@ -812,12 +849,9 @@ defmodule Smolquery.QueryService.Scatter do
   defp shard(target, files, context) do
     {elapsed_us, result} = dispatch(target, files, context)
 
-    case {target, result} do
-      {%{kind: :runner}, {:error, _reason}} ->
-        retry_on_peer(target, files, context, {elapsed_us, result})
-
-      _answered_or_peer_failed ->
-        {target, wait_us(elapsed_us, result), result}
+    case result do
+      {:error, _reason} -> retry_on_peer(target, files, context, {elapsed_us, result})
+      _answered -> {target, wait_us(elapsed_us, result), result}
     end
   end
 
@@ -832,17 +866,28 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp retry_target(%{merge: _level}, _context), do: nil
+  defp retry_target(%{kind: :peer, node: node, merge: _level} = target, %{peers: peers} = context) do
+    case Enum.reject(peers, &(&1.node == node)) do
+      [] -> retry_host(target, peers, context)
+      others -> retry_host(target, others, context)
+    end
+  end
 
-  defp retry_target(%{index: index}, %{peers: [_ | _] = peers} = context) do
+  defp retry_target(%{kind: :peer}, _scan_on_a_peer), do: nil
+
+  defp retry_target(%{kind: :runner} = target, %{peers: peers} = context),
+    do: retry_host(target, peers, context)
+
+  defp retry_host(_target, [], _context), do: nil
+
+  defp retry_host(%{index: index} = target, peers, context) do
     if remaining_ms(context.deadline_ms) > context.runtime.burst.retry_floor_ms do
       peers
       |> Enum.at(rem(index, length(peers)))
       |> Map.merge(%{index: index, retry: true})
+      |> Map.merge(Map.take(target, [:merge]))
     end
   end
-
-  defp retry_target(_target, _no_peers), do: nil
 
   defp remaining_ms(:infinity), do: :infinity
   defp remaining_ms(deadline_ms), do: deadline_ms - System.monotonic_time(:millisecond)
