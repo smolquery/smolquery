@@ -87,7 +87,9 @@ defmodule Smolquery.QueryService.Scatter do
      level is dealt by partition instead (`Policy.partition_groups/2`): a
      shard takes whole buckets across every runner's partial, every group
      it answers is complete, and that one level is the merge; the final
-     reads the shrunk outputs. After the final the job's spill prefix is
+     reads the shrunk outputs. A bucket is a file per runner, so a shard
+     is bound by `merge_max_files` as well as by bytes, in the packing and
+     in a peer's share (T-702). After the final the job's spill prefix is
      listed and swept, off the merge's critical path; the keys the
      coordinator can name are the fallback when the store cannot list, since
      a runner that went silent after uploading some of its buckets left
@@ -637,7 +639,12 @@ defmodule Smolquery.QueryService.Scatter do
     |> Enum.group_by(& &1.partition)
     |> Enum.sort()
     |> Enum.map(fn {partition, parts} ->
-      %{partition: partition, parts: parts, bytes: Enum.sum_by(parts, & &1.bytes)}
+      %{
+        partition: partition,
+        parts: parts,
+        bytes: Enum.sum_by(parts, & &1.bytes),
+        files: length(parts)
+      }
     end)
   end
 

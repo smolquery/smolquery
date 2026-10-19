@@ -58,6 +58,16 @@ defmodule Smolquery.Burst.Policy do
   Partitions pack into shards up to `merge_target_bytes`; one over the
   target is a shard alone. One level finishes the merge, and the final
   reads only the shrunk outputs.
+
+  A bucket is one file per runner that wrote to it, and a pod opens a
+  file in about 8 ms however small (T-702): on the 0.26.0 bench at 250
+  runners three pod shards took every bucket, the slowest read 800 files
+  for 152 MB in 7.6 s, and the level took 9 to 11 s where the scan took 3.
+  So a shard is bound by `merge_max_files` (256) as well as by bytes:
+  partitions pack under it as under the byte target, one over it alone,
+  and a peer stops taking groups at it. At 250 runners every bucket is a
+  shard of its own and sixteen shards read in parallel; a whole spilled
+  partial counts as one file, so the by-count tree never meets the bound.
   """
 
   @type request :: false | :auto | non_neg_integer()
@@ -78,12 +88,23 @@ defmodule Smolquery.Burst.Policy do
           required(:merge_target_bytes) => pos_integer(),
           required(:merge_min_bytes) => non_neg_integer(),
           required(:merge_peer_weight) => non_neg_integer(),
+          required(:merge_max_files) => pos_integer(),
           optional(atom()) => term()
         }
 
   @type merge_host(peer) :: :runner | {:peer, peer}
 
-  @type partial :: %{required(:bytes) => non_neg_integer(), optional(atom()) => term()}
+  @type partial :: %{
+          required(:bytes) => non_neg_integer(),
+          optional(:files) => pos_integer(),
+          optional(atom()) => term()
+        }
+
+  @type partition :: %{
+          required(:bytes) => non_neg_integer(),
+          required(:files) => pos_integer(),
+          optional(atom()) => term()
+        }
 
   @doc """
   How many runners a job that asked `request` over `scan_bytes` of sealed
@@ -144,61 +165,79 @@ defmodule Smolquery.Burst.Policy do
 
   @doc """
   The merge groups one level deals `partitions` into, each a list of
-  whole partitions packed largest first up to `merge_target_bytes`, a
-  partition over the target alone; none when the partitions together are
-  under `merge_min_bytes` or the tree is off (`merge_fan_in` under 2).
-  `merge_fan_in` does not otherwise bound a bucket shard, which reads one
-  file per runner per bucket. A partition here is the sum of one hash
-  bucket across every spilled partial, and no two of them share a group,
-  so a shard over a group of them answers complete groups and the level
-  is the last.
+  whole partitions packed largest first up to `merge_target_bytes` and
+  `merge_max_files`, a partition over either alone; none when the
+  partitions together are under `merge_min_bytes` or the tree is off
+  (`merge_fan_in` under 2). `merge_fan_in` does not otherwise bound a
+  bucket shard, which reads one file per runner per bucket; `files` is
+  that count. A partition here is the sum of one hash bucket across every
+  spilled partial, and no two of them share a group, so a shard over a
+  group of them answers complete groups and the level is the last.
   """
-  @spec partition_groups([partial()], merge_config()) :: [[partial()]]
+  @spec partition_groups([partition()], merge_config()) :: [[partition()]]
   def partition_groups(_partitions, %{merge_fan_in: fan_in}) when fan_in < 2, do: []
 
-  def partition_groups(partitions, %{merge_min_bytes: floor, merge_target_bytes: target}) do
-    if Enum.sum_by(partitions, & &1.bytes) < floor, do: [], else: pack(partitions, target)
+  def partition_groups(partitions, %{merge_min_bytes: floor} = config) do
+    if Enum.sum_by(partitions, & &1.bytes) < floor, do: [], else: pack(partitions, config)
   end
 
-  defp pack(partitions, target) do
+  defp pack(partitions, %{merge_target_bytes: target, merge_max_files: max_files}) do
     partitions
     |> Enum.sort_by(& &1.bytes, :desc)
     |> Enum.reduce([], fn
-      partition, [{group, bytes} | rest] when bytes + partition.bytes <= target ->
-        [{[partition | group], bytes + partition.bytes} | rest]
+      partition, [{group, bytes, files} | rest]
+      when bytes + partition.bytes <= target and files + partition.files <= max_files ->
+        [{[partition | group], bytes + partition.bytes, files + partition.files} | rest]
 
       partition, groups ->
-        [{[partition], partition.bytes} | groups]
+        [{[partition], partition.bytes, partition.files} | groups]
     end)
     |> Enum.reverse()
-    |> Enum.map(fn {group, _bytes} -> Enum.reverse(group) end)
+    |> Enum.map(fn {group, _bytes, _files} -> Enum.reverse(group) end)
   end
 
   @doc """
-  The merge shards one level runs over `groups` (from `merge_groups/2`),
-  each on a host: the peers take the first `merge_peer_weight` groups
-  each, dealt as evenly as the peers allow, as one shard per peer; every
-  group after that is a shard on a runner. None when fewer than two shards
-  would run, since one shard moves the whole merge to one host and saves
-  the coordinator nothing. A weight of `0` sends every group to a runner.
+  The merge shards one level runs over `groups` (from `merge_groups/2` or
+  `partition_groups/2`), each on a host: the peers take the first
+  `merge_peer_weight` groups each, dealt as evenly as the peers allow, as
+  one shard per peer, and a peer stops short of its share at the group
+  that would put its shard over `merge_max_files`; every group after that
+  is a shard on a runner. A group's files are its partitions' `files`,
+  one for a whole partial. None when fewer than two shards would run,
+  since one shard moves the whole merge to one host and saves the
+  coordinator nothing. A weight of `0` sends every group to a runner.
   """
   @spec merge_shards([[partial()]], [peer], merge_config()) :: [{merge_host(peer), [partial()]}]
         when peer: term()
-  def merge_shards(groups, peers, %{merge_peer_weight: weight}) do
+  def merge_shards(groups, peers, %{merge_peer_weight: weight, merge_max_files: max_files}) do
     peer_count = length(peers)
-    on_peers = min(length(groups), weight * peer_count)
-    {for_peers, for_runners} = Enum.split(groups, on_peers)
+    share = ceil_div(min(length(groups), weight * peer_count), max(peer_count, 1))
 
-    peer_shards =
-      for_peers
-      |> Enum.chunk_every(max(ceil_div(on_peers, max(peer_count, 1)), 1))
-      |> Enum.zip_with(peers, fn chunk, peer -> {{:peer, peer}, List.flatten(chunk)} end)
+    {peer_shards, for_runners} =
+      Enum.flat_map_reduce(peers, groups, fn peer, left ->
+        case take(left, share, max_files) do
+          {[], left} -> {[], left}
+          {taken, left} -> {[{{:peer, peer}, List.flatten(taken)}], left}
+        end
+      end)
 
     case peer_shards ++ Enum.map(for_runners, &{:runner, &1}) do
       [_, _ | _] = shards -> shards
       _one_or_none -> []
     end
   end
+
+  defp take(groups, share, max_files), do: take(groups, share, max_files, {[], 0, 0})
+
+  defp take([group | rest] = groups, share, max_files, {taken, count, files}) do
+    more = Enum.sum_by(group, &Map.get(&1, :files, 1))
+
+    if count < share and (count == 0 or files + more <= max_files),
+      do: take(rest, share, max_files, {[group | taken], count + 1, files + more}),
+      else: {Enum.reverse(taken), groups}
+  end
+
+  defp take([], _share, _max_files, {taken, _count, _files}), do: {Enum.reverse(taken), []}
 
   @doc """
   Whether a level that merged `bytes_in` of partials into `bytes_out` earns
