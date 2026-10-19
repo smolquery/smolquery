@@ -19,7 +19,7 @@ defmodule Smolquery.QueryService.ScanColumnsTest do
     %{
       @events =>
         Schema.new!([{"id", :int64}, {"name", :string}, {"amount", :float64}, {"ts", :timestamp}]),
-      @users => Schema.new!([{"id", :int64}, {"email", :string}])
+      @users => Schema.new!([{"id", :int64}, {"email", :string}, {"payload", :variant}])
     }
   end
 
@@ -61,6 +61,21 @@ defmodule Smolquery.QueryService.ScanColumnsTest do
              referenced(
                "SELECT u.email FROM analytics.events e JOIN analytics.users u ON u.id = e.id"
              )
+  end
+
+  test "the columns a JOIN USING names count, and a NATURAL JOIN reads everything" do
+    assert %{@events => ["id"], @users => ["id"]} =
+             referenced(
+               "SELECT count(*) FROM analytics.events e JOIN analytics.users u USING (id)"
+             )
+
+    assert %{@events => :all, @users => :all} =
+             referenced("SELECT count(*) FROM analytics.events NATURAL JOIN analytics.users")
+  end
+
+  test "a field read out of a struct column counts the column" do
+    assert %{@users => ["payload"]} =
+             referenced("SELECT payload.user_id FROM analytics.users WHERE payload.kind = 'x'")
   end
 
   test "a CTE's own names do not count, its reads do" do
