@@ -806,7 +806,11 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
        ]
   test "runners spill their partials split by group-key hash, and one level merges whole buckets (T-701)",
        context do
-    bucket_level(context)
+    {tree, merges} = bucket_level(context)
+
+    assert %{shards: 2, peer_shards: 2} = tree.meta
+    assert [_, _] = merges
+    assert Enum.all?(merges, &(&1.meta.kind == :peer))
   end
 
   @tag burst: [
@@ -814,12 +818,17 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
          spill: true,
          spill_inline_max_bytes: 0,
          merge_min_bytes: 0,
-         merge_partitions: 2,
+         merge_partitions: 8,
          merge_max_files: 1
        ]
-  test "a bucket shard is bound by files: every bucket is a shard of its own, and a peer's share stops there (T-702)",
+  test "a bucket shard is bound by files: every bucket is a shard of its own, each peer takes one, and the rest go to runners (T-702)",
        context do
-    bucket_level(context)
+    {tree, merges} = bucket_level(context)
+    buckets = length(merges)
+
+    assert buckets >= 4
+    assert %{shards: ^buckets, peer_shards: 3} = tree.meta
+    assert Enum.count(merges, &(&1.meta.kind == :runner)) == buckets - 3
   end
 
   defp bucket_level(%{
@@ -847,30 +856,19 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert Enum.all?(scans, & &1.meta.spilled)
 
     assert [tree] = Enum.filter(job.trace, &(&1.name == :tree_merge))
-
-    assert %{
-             outcome: :ok,
-             levels: 1,
-             shards: 2,
-             peer_shards: 2,
-             partitioned: true,
-             left_bytes: left
-           } =
-             tree.meta
-
+    assert %{outcome: :ok, levels: 1, partitioned: true, left_bytes: left} = tree.meta
     assert left > 0 and tree.meta.consumed >= 4
 
     merges = Enum.filter(job.trace, &(&1.name == :shard and Map.has_key?(&1.meta, :merge_level)))
-    assert [_, _] = merges
 
     for merge <- merges do
-      assert %{kind: :peer, merge_level: 1, partitions: 1, inputs: inputs, rows: rows} =
-               merge.meta
-
+      assert %{merge_level: 1, partitions: 1, inputs: inputs, rows: rows} = merge.meta
       assert inputs in 1..4 and rows > 0
     end
 
     assert {:ok, []} = Store.list(seed_store(tmp_dir), "burst-partials")
+
+    {tree, merges}
   end
 
   @tag burst: [max: 4, spill: true, spill_inline_max_bytes: 0, merge_fan_in: 2]
