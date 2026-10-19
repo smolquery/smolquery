@@ -98,15 +98,20 @@ defmodule Smolquery.QueryService.Scatter do
      `tree_merge` span. A merge shard that fails, on a runner or on a
      peer, is retried once on a peer, another than the one it failed on
      when there is one, while the retry floor of the deadline remains
-     (T-703): a peer merge
-     shard spills through its own store, so a peer answers a merge as a
-     runner would. A level waits for every shard, and a shard that failed
-     twice leaves only its own inputs to the coordinator; the shards that
-     answered are kept, since the final re-aggregates whatever it reads,
-     so the final takes the shrunk outputs plus the failed shards' inputs
-     and never a whole level's bucket files. A level that failed is the
-     last; the `tree_merge` outcome is `:partial`. A failure anywhere after
-     a level has landed sweeps the job's whole spill prefix.
+     (T-703): a peer merge shard spills through its own store, so a peer
+     answers a merge as a runner would. A level waits for every shard's
+     reply, so the coordinator kills no merge shard for another's error.
+     A shard that failed twice leaves only its own inputs to the
+     coordinator, and its spill key is deleted; the shards that answered
+     are kept, since the final re-aggregates whatever it reads. So the
+     final takes the shrunk outputs plus the failed shards' inputs and
+     never a whole level's bucket files; a level that failed is the last,
+     and the `tree_merge` outcome is `:partial`. A retry writes the same
+     spill key as the attempt before it, whose worker may still be
+     uploading after a transport error, so a late object can land after
+     the sweep, for the store's lifecycle rule. A level whose own task
+     crashes still falls back whole. A failure anywhere after a level has
+     landed sweeps the job's whole spill prefix.
 
   ## PoC limits
 
@@ -700,7 +705,8 @@ defmodule Smolquery.QueryService.Scatter do
 
     case level(context, dir, targets) do
       {:ok, merged, []} ->
-        stats = advanced(stats, targets, Enum.flat_map(grouped, &keys/1), 0)
+        consumed = Enum.flat_map(grouped, &keys/1)
+        stats = advanced(stats, targets, consumed, {on_peers(merged, []), 0})
         bytes = {Enum.sum_by(grouped, & &1.bytes), Enum.sum_by(merged, & &1.bytes)}
         next_level(context, dir, kept ++ merged, bytes, stats)
 
@@ -710,9 +716,16 @@ defmodule Smolquery.QueryService.Scatter do
             "left their inputs to the coordinator: #{inspect(reason)}"
         )
 
-        lost = Enum.map(failed, fn {target, _reason} -> target.index end)
-        {lost, done} = Enum.split_with(targets, fn {target, _group} -> target.index in lost end)
-        stats = advanced(stats, targets, Enum.flat_map(groups(done), &keys/1), length(failed))
+        failed_indexes = MapSet.new(failed, fn {target, _reason} -> target.index end)
+
+        {lost, done} =
+          Enum.split_with(targets, fn {target, _group} ->
+            MapSet.member?(failed_indexes, target.index)
+          end)
+
+        delete_spilled(runtime, level_keys(runtime, context.job_id, lost))
+        consumed = Enum.flat_map(groups(done), &keys/1)
+        stats = advanced(stats, targets, consumed, {on_peers(merged, failed), length(failed)})
         inputs = kept ++ merged ++ Enum.map(groups(lost), &as_partial/1)
         {inputs, settled(stats, :partial, inputs)}
 
@@ -721,16 +734,20 @@ defmodule Smolquery.QueryService.Scatter do
           "tree merge level #{stats.level} fell back to the coordinator: #{inspect(reason)}"
         )
 
-        delete_spilled(
-          runtime,
-          for({target, _group} <- targets, do: spill_key(runtime, context.job_id, target.index))
-        )
-
+        delete_spilled(runtime, level_keys(runtime, context.job_id, targets))
         {kept ++ grouped, settled(stats, :error, kept ++ grouped)}
     end
   end
 
   defp groups(targets), do: Enum.flat_map(targets, &elem(&1, 1))
+
+  defp level_keys(runtime, job_id, targets),
+    do: for({target, _group} <- targets, do: spill_key(runtime, job_id, target.index))
+
+  defp on_peers(merged, failed) do
+    Enum.count(merged, &(&1.kind == :peer)) +
+      Enum.count(failed, fn {target, _reason} -> target.kind == :peer end)
+  end
 
   defp as_partial(%{parts: [first | _more] = parts, bytes: bytes} = bucket)
        when not is_map_key(bucket, :spilled),
@@ -756,14 +773,14 @@ defmodule Smolquery.QueryService.Scatter do
     })
   end
 
-  defp advanced(stats, targets, consumed, failed) do
+  defp advanced(stats, targets, consumed, {peers, failed}) do
     shards = length(targets)
 
     %{
       stats
       | level: stats.level + 1,
         shards: stats.shards + shards,
-        peer_shards: stats.peer_shards + Enum.count(targets, &(elem(&1, 0).kind == :peer)),
+        peer_shards: stats.peer_shards + peers,
         failed: stats.failed + failed,
         consumed: stats.consumed ++ consumed,
         next_index: stats.next_index + shards
@@ -866,17 +883,13 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp retry_target(%{kind: :peer, node: node, merge: _level} = target, %{peers: peers} = context) do
-    case Enum.reject(peers, &(&1.node == node)) do
-      [] -> retry_host(target, peers, context)
-      others -> retry_host(target, others, context)
-    end
+  defp retry_target(%{kind: kind} = target, %{peers: peers} = context)
+       when kind == :runner or is_map_key(target, :merge) do
+    others = Enum.reject(peers, &(&1.node == Map.get(target, :node)))
+    retry_host(target, if(others == [], do: peers, else: others), context)
   end
 
-  defp retry_target(%{kind: :peer}, _scan_on_a_peer), do: nil
-
-  defp retry_target(%{kind: :runner} = target, %{peers: peers} = context),
-    do: retry_host(target, peers, context)
+  defp retry_target(_scan_on_a_peer, _context), do: nil
 
   defp retry_host(_target, [], _context), do: nil
 

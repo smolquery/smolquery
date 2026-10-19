@@ -890,7 +890,9 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
        context do
     job = flaky_level(context)
 
-    assert %{outcome: :ok, levels: 1, shards: 2, failed_shards: 0} = tree_merge(job).meta
+    assert %{outcome: :ok, levels: 1, shards: 2, peer_shards: 1, failed_shards: 0} =
+             tree_merge(job).meta
+
     assert [failed] = merge_shards(job, &Map.has_key?(&1.meta, :error))
     assert %{kind: :runner, shard: 7, merge_level: 1} = failed.meta
 
@@ -937,8 +939,10 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
        context do
     job = flaky_level(context)
 
-    assert %{outcome: :partial, levels: 1, shards: 2, failed_shards: 1, consumed: consumed} =
+    assert %{outcome: :partial, levels: 1, shards: 2, peer_shards: 1, failed_shards: 1} =
              tree_merge(job).meta
+
+    assert %{consumed: consumed} = tree_merge(job).meta
 
     assert consumed > 0 and tree_merge(job).meta.left_bytes > 0
     assert [_runner, _peer] = merge_shards(job, &Map.has_key?(&1.meta, :error))
