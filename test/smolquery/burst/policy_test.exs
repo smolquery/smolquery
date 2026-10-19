@@ -208,6 +208,13 @@ defmodule Smolquery.Burst.PolicyTest do
                Policy.merge_shards(groups(15), @peers, %{@merge | merge_max_files: 2})
     end
 
+    test "a peer passes over a group that does not fit and takes a later one that does (T-702)" do
+      uneven = for files <- [250, 250, 6], do: [%{partition: files, bytes: @mib, files: files}]
+
+      assert [{{:peer, :a}, [%{files: 250}, %{files: 6}]}, {:runner, [%{files: 250}]}] =
+               Policy.merge_shards(uneven, [:a], @merge)
+    end
+
     test "a level that would be one shard is not run" do
       assert [] == Policy.merge_shards(groups(4), [:a], @merge)
 

@@ -65,9 +65,11 @@ defmodule Smolquery.Burst.Policy do
   for 152 MB in 7.6 s, and the level took 9 to 11 s where the scan took 3.
   So a shard is bound by `merge_max_files` (256) as well as by bytes:
   partitions pack under it as under the byte target, one over it alone,
-  and a peer stops taking groups at it. At 250 runners every bucket is a
-  shard of its own and sixteen shards read in parallel; a whole spilled
-  partial counts as one file, so the by-count tree never meets the bound.
+  and a peer passes over a group that would take its shard past it. At
+  250 runners every bucket is a shard of its own and sixteen shards read
+  in parallel. A whole spilled partial counts as one file, so a by-count
+  shard meets the bound only when `merge_fan_in` times the peer weight is
+  over it, which the defaults (16 and 4) are not.
   """
 
   @type request :: false | :auto | non_neg_integer()
@@ -200,10 +202,10 @@ defmodule Smolquery.Burst.Policy do
   The merge shards one level runs over `groups` (from `merge_groups/2` or
   `partition_groups/2`), each on a host: the peers take the first
   `merge_peer_weight` groups each, dealt as evenly as the peers allow, as
-  one shard per peer, and a peer stops short of its share at the group
-  that would put its shard over `merge_max_files`; every group after that
-  is a shard on a runner. A group's files are its partitions' `files`,
-  one for a whole partial. None when fewer than two shards would run,
+  one shard per peer, and a peer passes over a group that would put its
+  shard over `merge_max_files`, which the next peer may take; the groups
+  no peer took are shards on runners, one each. A group's files are its
+  partitions' `files`, one for a whole partial. None when fewer than two shards would run,
   since one shard moves the whole merge to one host and saves the
   coordinator nothing. A weight of `0` sends every group to a runner.
   """
@@ -227,17 +229,18 @@ defmodule Smolquery.Burst.Policy do
     end
   end
 
-  defp take(groups, share, max_files), do: take(groups, share, max_files, {[], 0, 0})
+  defp take(groups, share, max_files) do
+    {taken, left, _count, _files} =
+      Enum.reduce(groups, {[], [], 0, 0}, fn group, {taken, left, count, files} ->
+        more = Enum.sum_by(group, &Map.get(&1, :files, 1))
 
-  defp take([group | rest] = groups, share, max_files, {taken, count, files}) do
-    more = Enum.sum_by(group, &Map.get(&1, :files, 1))
+        if count < share and (count == 0 or files + more <= max_files),
+          do: {[group | taken], left, count + 1, files + more},
+          else: {taken, [group | left], count, files}
+      end)
 
-    if count < share and (count == 0 or files + more <= max_files),
-      do: take(rest, share, max_files, {[group | taken], count + 1, files + more}),
-      else: {Enum.reverse(taken), groups}
+    {Enum.reverse(taken), Enum.reverse(left)}
   end
-
-  defp take([], _share, _max_files, {taken, _count, _files}), do: {Enum.reverse(taken), []}
 
   @doc """
   Whether a level that merged `bytes_in` of partials into `bytes_out` earns
