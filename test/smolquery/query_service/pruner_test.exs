@@ -329,4 +329,15 @@ defmodule Smolquery.QueryService.PrunerTest do
       refute Pruner.keep?(legacy, [{"ts_int", :gt, 100}], nil)
     end
   end
+
+  describe "keep_stats?/2 (T-705)" do
+    test "decides over decoded bounds keyed by the conjuncts' names" do
+      stats = %{"id" => %{min: 1, max: 10}}
+
+      assert Pruner.keep_stats?(stats, [{"id", :gt, 5}])
+      refute Pruner.keep_stats?(stats, [{"id", :gt, 10}])
+      assert Pruner.keep_stats?(%{}, [{"id", :gt, 10}])
+      assert Pruner.keep_stats?(stats, [])
+    end
+  end
 end

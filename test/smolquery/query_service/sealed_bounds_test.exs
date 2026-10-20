@@ -12,15 +12,17 @@ defmodule Smolquery.QueryService.SealedBoundsTest do
             {"name", :string, id: 5},
             {"price", {:numeric, 10, 2}, id: 6}
           ])
-  @ids Schema.field_ids(@schema)
 
   defp file(bounds), do: %{path: "f.parquet", rows: 1, bytes: 1, column_bytes: 1, bounds: bounds}
 
   defp bound(min, max, extra \\ %{}),
     do: Map.merge(%{min: min, max: max, null_count: 0, nan: false}, extra)
 
-  describe "prunable/2" do
-    test "names the conjunct columns whose catalog bounds are exact" do
+  defp keep?(file, conjuncts),
+    do: SealedBounds.keep?(file, SealedBounds.columns(@schema, conjuncts), conjuncts)
+
+  describe "columns/2" do
+    test "names the conjunct columns whose catalog bounds are exact, with their ids and types" do
       conjuncts = [
         {"id", :gt, 1},
         {"name", :eq, "x"},
@@ -29,19 +31,24 @@ defmodule Smolquery.QueryService.SealedBoundsTest do
         {"id", :lt, 9}
       ]
 
-      assert SealedBounds.prunable(@schema, conjuncts) == ["id", "ts"]
+      assert SealedBounds.columns(@schema, conjuncts) == [
+               {"id", 1, :int64},
+               {"ts", 3, :timestamp}
+             ]
+
+      assert SealedBounds.columns(@schema, []) == []
     end
   end
 
-  describe "keep?/4" do
+  describe "keep?/3" do
     test "an integer bound outside the file's range drops it, inside keeps it" do
       file = file(%{1 => bound("1001", "1010")})
 
-      refute SealedBounds.keep?(file, @schema, [{"id", :gt, 1010}], @ids)
-      refute SealedBounds.keep?(file, @schema, [{"id", :lt, 1001}], @ids)
-      assert SealedBounds.keep?(file, @schema, [{"id", :ge, 1010}], @ids)
-      assert SealedBounds.keep?(file, @schema, [{"id", :eq, 1005}], @ids)
-      refute SealedBounds.keep?(file, @schema, [{"id", :eq, 2000}], @ids)
+      refute keep?(file, [{"id", :gt, 1010}])
+      refute keep?(file, [{"id", :lt, 1001}])
+      assert keep?(file, [{"id", :ge, 1010}])
+      assert keep?(file, [{"id", :eq, 1005}])
+      refute keep?(file, [{"id", :eq, 2000}])
     end
 
     test "timestamps and dates read as the catalog prints them" do
@@ -51,62 +58,42 @@ defmodule Smolquery.QueryService.SealedBoundsTest do
           4 => bound("2024-01-01", "2024-01-31")
         })
 
-      refute SealedBounds.keep?(file, @schema, [{"ts", :gt, ~N[2024-02-01 00:00:00]}], @ids)
-      assert SealedBounds.keep?(file, @schema, [{"ts", :gt, ~N[2024-01-31 23:59:59]}], @ids)
-      refute SealedBounds.keep?(file, @schema, [{"day", :lt, ~D[2024-01-01]}], @ids)
-      assert SealedBounds.keep?(file, @schema, [{"day", :le, ~D[2024-01-01]}], @ids)
+      refute keep?(file, [{"ts", :gt, ~N[2024-02-01 00:00:00]}])
+      assert keep?(file, [{"ts", :gt, ~N[2024-01-31 23:59:59]}])
+      refute keep?(file, [{"day", :lt, ~D[2024-01-01]}])
+      assert keep?(file, [{"day", :le, ~D[2024-01-01]}])
     end
 
-    test "a double column that holds a NaN, an unparsable bound, or no bound at all keeps the file" do
-      assert SealedBounds.keep?(
-               file(%{2 => bound("1.5", "2.5", %{nan: true})}),
-               @schema,
-               [{"amount", :gt, 3.0}],
-               @ids
-             )
+    test "a double column prunes only when the catalog says it holds no NaN" do
+      refute keep?(file(%{2 => bound("1.5", "2.5")}), [{"amount", :gt, 3.0}])
+      assert keep?(file(%{2 => bound("1.5", "2.5", %{nan: true})}), [{"amount", :gt, 3.0}])
+      assert keep?(file(%{2 => bound("1.5", "2.5", %{nan: nil})}), [{"amount", :gt, 3.0}])
+    end
 
-      refute SealedBounds.keep?(
-               file(%{2 => bound("1.5", "2.5")}),
-               @schema,
-               [{"amount", :gt, 3.0}],
-               @ids
-             )
+    test "an unparsable bound, or no bound at all, keeps the file" do
+      assert keep?(file(%{1 => bound("one", "ten")}), [{"id", :gt, 10}])
 
-      assert SealedBounds.keep?(
-               file(%{1 => bound("one", "ten")}),
-               @schema,
-               [{"id", :gt, 10}],
-               @ids
-             )
+      assert keep?(file(%{3 => bound("yesterday", "today")}), [
+               {"ts", :gt, ~N[2024-01-01 00:00:00]}
+             ])
 
-      assert SealedBounds.keep?(file(%{1 => bound(nil, nil)}), @schema, [{"id", :gt, 10}], @ids)
-      assert SealedBounds.keep?(file(%{}), @schema, [{"id", :gt, 10}], @ids)
+      assert keep?(file(%{1 => bound(nil, nil)}), [{"id", :gt, 10}])
+      assert keep?(file(%{}), [{"id", :gt, 10}])
     end
 
     test "a bound on a string or decimal column never prunes" do
       file = file(%{5 => bound("a", "b"), 6 => bound("1.00", "2.00")})
 
-      assert SealedBounds.keep?(file, @schema, [{"name", :gt, "z"}], @ids)
-      assert SealedBounds.keep?(file, @schema, [{"price", :gt, 5}], @ids)
+      assert keep?(file, [{"name", :gt, "z"}])
+      assert keep?(file, [{"price", :gt, 5}])
     end
 
     test "every conjunct must leave a match possible" do
       file =
         file(%{1 => bound("1", "10"), 3 => bound("2024-01-01 00:00:00", "2024-01-02 00:00:00")})
 
-      assert SealedBounds.keep?(
-               file,
-               @schema,
-               [{"id", :gt, 5}, {"ts", :lt, ~N[2024-01-02 00:00:00]}],
-               @ids
-             )
-
-      refute SealedBounds.keep?(
-               file,
-               @schema,
-               [{"id", :gt, 5}, {"ts", :gt, ~N[2024-01-03 00:00:00]}],
-               @ids
-             )
+      assert keep?(file, [{"id", :gt, 5}, {"ts", :lt, ~N[2024-01-02 00:00:00]}])
+      refute keep?(file, [{"id", :gt, 5}, {"ts", :gt, ~N[2024-01-03 00:00:00]}])
     end
   end
 end

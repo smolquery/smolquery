@@ -700,17 +700,15 @@ defmodule Smolquery.QueryService.Planner do
 
   defp sealed_scan(runtime, ref, snapshot, %{stats: stats, schema: schema}, columns, conjuncts) do
     ids = Smolquery.Schema.field_ids(schema) || %{}
-    bounds = column_ids(ids, SealedBounds.prunable(schema, conjuncts))
+    prunable = SealedBounds.columns(schema, conjuncts)
+    request = %{sizes: column_ids(ids, columns), bounds: Enum.map(prunable, &elem(&1, 1))}
 
-    case sealed_files(runtime, ref, snapshot, columns, %{
-           sizes: column_ids(ids, columns),
-           bounds: bounds
-         }) do
+    case column_stats_files(runtime, ref, snapshot, request) do
       :whole ->
         %{stats: Map.put(stats, :scanned, whole(stats, columns)), skipped: MapSet.new()}
 
       {:ok, files} ->
-        {kept, skipped} = Enum.split_with(files, &SealedBounds.keep?(&1, schema, conjuncts, ids))
+        {kept, skipped} = Enum.split_with(files, &SealedBounds.keep?(&1, prunable, conjuncts))
 
         %{
           stats: Map.put(stats, :scanned, sealed_scanned(kept, columns)),
@@ -719,10 +717,9 @@ defmodule Smolquery.QueryService.Planner do
     end
   end
 
-  defp sealed_files(_runtime, _ref, _snapshot, _columns, %{sizes: [], bounds: []}), do: :whole
-  defp sealed_files(_runtime, _ref, _snapshot, [_ | _], %{sizes: []}), do: :whole
+  defp column_stats_files(_runtime, _ref, _snapshot, %{sizes: [], bounds: []}), do: :whole
 
-  defp sealed_files(runtime, ref, snapshot, _columns, request) do
+  defp column_stats_files(runtime, ref, snapshot, request) do
     case Catalog.file_column_stats(runtime.catalog, ref, snapshot, request) do
       {:ok, files} -> {:ok, files}
       {:error, _unsupported_or_failed} -> :whole
@@ -965,6 +962,7 @@ defmodule Smolquery.QueryService.Planner do
     MapSet.member?(table.skipped, path) or FileCache.cached?(runtime.name, Path.basename(path))
   end
 
+  defp live_bytes(%{stats: %{scanned: %{bytes: bytes}}}), do: bytes
   defp live_bytes(%{stats: %{bytes: bytes}}), do: bytes
   defp live_bytes(_table), do: 0
 

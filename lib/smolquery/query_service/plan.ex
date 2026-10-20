@@ -54,6 +54,11 @@ defmodule Smolquery.QueryService.Plan do
   connection, T-610), to load them before it locks the engine down —
   loading an extension is not free, and on a SQLite-metadata deployment
   nothing else would pull `postgres` in.
+  `sealed_skipped` is the sealed files the planner pruned by their catalog
+  bounds (`Smolquery.QueryService.SealedBounds`, T-705), per table, as the
+  absolute paths the catalog lists them by. `Smolquery.QueryService.Scatter`
+  deals every live file but these; the single-engine path needs nothing
+  from it, since DuckLake prunes the same files itself.
   """
 
   alias Smolquery.BufferService.HotClient
