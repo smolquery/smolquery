@@ -151,6 +151,22 @@ defmodule Smolquery.QueryService.Statistics do
   def bytes_accounted(%__MODULE__{} = statistics), do: bytes_scanned(statistics)
 
   @doc """
+  `bytes_accounted/1` in MiB, rounded to two decimals.
+  """
+  @spec mib_accounted(t()) :: float()
+  def mib_accounted(%__MODULE__{} = statistics), do: mib(bytes_accounted(statistics))
+
+  @doc """
+  `bytes_read` in MiB, rounded to two decimals; `nil` when nothing was
+  measured.
+  """
+  @spec mib_read(t()) :: float() | nil
+  def mib_read(%__MODULE__{bytes_read: nil}), do: nil
+  def mib_read(%__MODULE__{bytes_read: bytes}), do: mib(bytes)
+
+  defp mib(bytes), do: Float.round(bytes / 1_048_576, 2)
+
+  @doc """
   The whole size of the files the plan reads, both tiers.
   """
   @spec file_bytes(t()) :: non_neg_integer()

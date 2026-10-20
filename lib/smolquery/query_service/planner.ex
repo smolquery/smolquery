@@ -696,7 +696,7 @@ defmodule Smolquery.QueryService.Planner do
   end
 
   defp sealed_scan(_runtime, _ref, _snapshot, %{stats: :unavailable}, _columns, _conjuncts),
-    do: %{skipped: MapSet.new(), scan_bytes: %{}}
+    do: %{skipped: MapSet.new(), scan_bytes: %{files: %{}, default: :file}}
 
   defp sealed_scan(runtime, ref, snapshot, %{stats: stats, schema: schema}, columns, conjuncts) do
     ids = Smolquery.Schema.field_ids(schema) || %{}
@@ -708,7 +708,7 @@ defmodule Smolquery.QueryService.Planner do
         %{
           stats: Map.put(stats, :scanned, whole(stats, columns)),
           skipped: MapSet.new(),
-          scan_bytes: %{}
+          scan_bytes: %{files: %{}, default: if(columns == [], do: 0, else: :file)}
         }
 
       {:ok, files} ->
@@ -717,7 +717,10 @@ defmodule Smolquery.QueryService.Planner do
         %{
           stats: Map.put(stats, :scanned, sealed_scanned(kept, columns)),
           skipped: MapSet.new(skipped, & &1.path),
-          scan_bytes: Map.new(kept, &{&1.path, file_scan_bytes(&1, columns)})
+          scan_bytes: %{
+            files: Map.new(kept, &{&1.path, file_scan_bytes(&1, columns)}),
+            default: :file
+          }
         }
     end
   end

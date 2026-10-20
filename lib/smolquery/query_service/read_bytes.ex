@@ -9,16 +9,23 @@ defmodule Smolquery.QueryService.ReadBytes do
   with `HTTP` logging on, every request `httpfs` makes lands in the
   in-memory `duckdb_logs` table with its method, range, status and the
   response's `content-length`. A shard runs on a private engine, so the
-  log is the shard's alone; `enable/1` turns it on before the scan and
-  `measure/1` sums it after. The job engine does the same around a
+  log is the shard's alone; `enabled?/1` turns it on before the scan and
+  `measured/1` sums it after. The job engine does the same around a
   single-engine query.
+
+  The sum is computed inside DuckDB and two integers come back: a log row
+  carries the request's headers, the S3 signature and session token among
+  them, and they never leave the engine. A request counts when it got a
+  response; its bytes count when it was a `GET` answered with a 2xx
+  status, from the response's `content-length`. A `HEAD` moves no body
+  and a failed or retried request without a response moves nothing.
 
   The number is the bytes the object store sent: a local-disk store issues
   no HTTP and measures zero, and a file-cache hit on a pod fetches nothing
   and counts nothing, which is the honest meaning of what a scan pulled
   over the network. Logging costs nothing the probe could see: a scan with
-  it on ran at the speed of one without, and reading two hundred rows back
-  took 2 ms; a shard issues tens.
+  it on ran at the speed of one without, and the two statements here add
+  about 2 ms to a shard.
   """
 
   alias Smolquery.Engine.Connection
@@ -27,64 +34,36 @@ defmodule Smolquery.QueryService.ReadBytes do
   @type measured :: %{bytes: non_neg_integer(), requests: non_neg_integer()}
 
   @timeout_ms 5_000
-  @request ~r/'type': (\w+)/
-  @status ~r/'status': \w*?(\d{3})/
-  @length ~r/content-length=(\d+)/i
+
+  @enable "CALL enable_logging(['HTTP'], level := 'trace', storage := 'memory')"
+
+  @measure "SELECT CAST(count(*) AS BIGINT), CAST(COALESCE(SUM(" <>
+             "CASE WHEN message LIKE '%''type'': GET%' " <>
+             "AND regexp_matches(message, '''status'': \\w*?2\\d\\d') " <>
+             "THEN TRY_CAST(regexp_extract(message, '(?i)content-length=(\\d+)', 1) AS BIGINT) " <>
+             "END), 0) AS BIGINT) " <>
+             "FROM duckdb_logs WHERE type = 'HTTP' AND message LIKE '%''response'': {%'"
 
   @doc """
-  Turns `HTTP` logging on for `connection`'s engine, in memory.
+  Turns `HTTP` logging on for `connection`'s engine, in memory, and says
+  whether it is on.
   """
-  @spec enable(GenServer.server()) :: :ok | {:error, term()}
-  def enable(connection) do
-    statement = "CALL enable_logging(['HTTP'], level := 'trace', storage := 'memory')"
-
-    with {:ok, _enabled} <- Connection.query(connection, statement, [], @timeout_ms), do: :ok
-  end
+  @spec enabled?(GenServer.server()) :: boolean()
+  def enabled?(connection),
+    do: match?({:ok, _enabled}, Connection.query(connection, @enable, [], @timeout_ms))
 
   @doc """
-  What the engine's `HTTP` log holds so far.
+  What the engine's `HTTP` log holds so far, or `nil` when it cannot be
+  read.
   """
-  @spec measure(GenServer.server()) :: {:ok, measured()} | {:error, term()}
-  def measure(connection) do
-    statement = "SELECT message FROM duckdb_logs WHERE type = 'HTTP'"
+  @spec measured(GenServer.server()) :: measured() | nil
+  def measured(connection) do
+    case Connection.query(connection, @measure, [], @timeout_ms) do
+      {:ok, %{rows: [[requests, bytes]]}} when is_integer(requests) and is_integer(bytes) ->
+        %{bytes: bytes, requests: requests}
 
-    with {:ok, %{rows: rows}} <- Connection.query(connection, statement, [], @timeout_ms),
-         do: {:ok, sum(Enum.map(rows, &hd/1))}
-  end
-
-  @doc """
-  The bytes and requests in a list of `HTTP` log messages: a request
-  counts when it got a response, and its bytes count when it was a `GET`
-  answered with a 2xx status, from the response's `content-length`. A
-  `HEAD` moves no body and a failed or retried request without a response
-  moves nothing.
-  """
-  @spec sum([String.t()]) :: measured()
-  def sum(messages) do
-    Enum.reduce(messages, %{bytes: 0, requests: 0}, fn message,
-                                                       %{bytes: bytes, requests: requests} ->
-      case response(message) do
-        nil -> %{bytes: bytes, requests: requests}
-        status -> %{bytes: bytes + body(message, status), requests: requests + 1}
-      end
-    end)
-  end
-
-  defp response(message) do
-    case Regex.run(@status, message) do
-      [_match, status] -> String.to_integer(status)
-      nil -> nil
+      _unreadable ->
+        nil
     end
   end
-
-  defp body(message, status) when status in 200..299 do
-    with [_match, "GET"] <- Regex.run(@request, message),
-         [_match, length] <- Regex.run(@length, message) do
-      String.to_integer(length)
-    else
-      _head_or_unsized -> 0
-    end
-  end
-
-  defp body(_message, _failed), do: 0
 end

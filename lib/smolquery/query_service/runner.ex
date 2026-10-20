@@ -500,20 +500,16 @@ defmodule Smolquery.QueryService.Runner do
   end
 
   defp read_logging(%Runtime{accounting: %{measure: true}}, connection),
-    do: ReadBytes.enable(connection) == :ok
+    do: ReadBytes.enabled?(connection)
 
   defp read_logging(_runtime, _connection), do: false
 
-  defp bytes_read(%{read_bytes: bytes}, _connection, _logging) when is_integer(bytes), do: bytes
+  defp bytes_read(%{} = scatter, _connection, _logging), do: Map.get(scatter, :read_bytes)
 
-  defp bytes_read(_scatter, connection, true) do
-    case ReadBytes.measure(connection) do
-      {:ok, %{bytes: bytes}} -> bytes
-      {:error, _unreadable} -> nil
-    end
-  end
+  defp bytes_read(nil, connection, true),
+    do: with(%{bytes: bytes} <- ReadBytes.measured(connection), do: bytes)
 
-  defp bytes_read(_scatter, _connection, false), do: nil
+  defp bytes_read(nil, _connection, false), do: nil
 
   defp outcome(runtime, connection, plan, max_rows, nil, job_id, timeout_ms) do
     with {:ok, prepared} <- variants(connection, plan) do
