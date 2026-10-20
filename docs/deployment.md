@@ -220,7 +220,7 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
-### Next release: bytes scanned count the columns a query reads, over the files it keeps, beside what the engine fetched (T-704, T-705, T-706)
+### 0.28.0: bytes scanned count the columns a query reads, over the files it keeps, beside what the engine fetched (T-704, T-705, T-706)
 
 **TL;DR.** A job's `statistics.bytesScanned`, and the query page's "scanned N MiB", now count the bytes of the columns the query references, not the whole files: `SELECT count(*)` over the 92 GB bench table reports 0, `SELECT UserID` one column's worth, `SELECT *` the old number. The old number is still there as `fileBytes`. Anything that read `bytesScanned` as a file total should read `fileBytes` now. And the planner now prunes sealed files by the catalog's per-file bounds, so a bounded query over a sorted table counts only the files it keeps, and a burst query scatters only those. Nothing to configure.
 
