@@ -42,6 +42,26 @@ defmodule Smolquery.QueryService.StatisticsTest do
     end
   end
 
+  describe "read/3 and bytes_accounted/1 (T-706)" do
+    test "carries the measured bytes, and accounts by plan or by measurement" do
+      statistics =
+        Statistics.new(Statistics.tier(1, 1, 10, 100), Statistics.tier(2, 2, 900, 2_048))
+
+      assert Statistics.bytes_accounted(statistics) == 2_148
+      assert Statistics.read(nil, 10, :measured) == nil
+
+      planned = Statistics.read(statistics, 1_500, :plan)
+      assert %{bytes_read: 1_500, accounting: :plan} = planned
+      assert Statistics.bytes_accounted(planned) == 2_148
+
+      measured = Statistics.read(statistics, 1_500, :measured)
+      assert %{bytes_read: 1_500, accounting: :measured} = measured
+      assert Statistics.bytes_accounted(measured) == 1_500
+
+      assert %{bytes_read: nil, accounting: :plan} = Statistics.read(statistics, nil, :measured)
+    end
+  end
+
   describe "mib_scanned/1" do
     test "converts bytes to MiB, rounded to two decimals" do
       statistics =

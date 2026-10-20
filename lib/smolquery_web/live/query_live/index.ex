@@ -346,13 +346,17 @@ defmodule SmolqueryWeb.QueryLive.Index do
   defp running?(job), do: not QueryService.Job.terminal?(job)
 
   defp statistics_line(statistics) do
-    "scanned #{Statistics.mib_scanned(statistics)} MiB " <>
+    "#{statistics.accounting} #{Float.round(Statistics.bytes_accounted(statistics) / 1_048_576, 2)} MiB · " <>
+      "scanned #{Statistics.mib_scanned(statistics)} MiB " <>
       "of #{Statistics.mib_in_files(statistics)} MiB in files · " <>
       "#{Statistics.rows_scanned(statistics)} rows · " <>
       "#{Statistics.files_scanned(statistics)}/#{Statistics.files_total(statistics)} files " <>
       "(hot #{statistics.hot.files_scanned}/#{statistics.hot.files_total}, " <>
-      "sealed #{statistics.sealed.files_scanned})"
+      "sealed #{statistics.sealed.files_scanned})" <> read_line(statistics.bytes_read)
   end
+
+  defp read_line(nil), do: ""
+  defp read_line(bytes), do: " · fetched #{Float.round(bytes / 1_048_576, 2)} MiB"
 
   defp state_badge(:done), do: "badge-success"
   defp state_badge(:error), do: "badge-error"

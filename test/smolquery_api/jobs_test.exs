@@ -83,6 +83,9 @@ defmodule SmolqueryApi.JobControllerTest do
                "bytesScanned" => 0,
                "mibScanned" => 0.0,
                "fileBytes" => 0,
+               "bytesRead" => 0,
+               "bytesAccounted" => 0,
+               "accounting" => "plan",
                "hot" => %{
                  "filesTotal" => 0,
                  "filesScanned" => 0,

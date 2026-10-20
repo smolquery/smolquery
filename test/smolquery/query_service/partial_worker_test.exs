@@ -67,6 +67,13 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
 
       assert engine > 0 and describe > 0 and scan > 0
       assert reply.timings.worker_us >= describe + scan
+      assert reply.read == nil
+    end
+
+    test "measures what the shard fetched over HTTP when asked, nothing for local files (T-706)",
+         %{request: request} do
+      assert {:ok, %{read: %{bytes: 0, requests: 0}}} =
+               PartialWorker.run_standalone(Map.put(request, :read_bytes, true))
     end
 
     test "runs without lockdown when the spec says so", %{request: request} do

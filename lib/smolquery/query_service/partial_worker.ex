@@ -136,6 +136,7 @@ defmodule Smolquery.QueryService.PartialWorker do
   alias Smolquery.QueryService.FileCache
   alias Smolquery.QueryService.JobEngine
   alias Smolquery.QueryService.Lockdown
+  alias Smolquery.QueryService.ReadBytes
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Views
   alias Smolquery.Segments.FieldIds
@@ -199,7 +200,8 @@ defmodule Smolquery.QueryService.PartialWorker do
           required(:allowed_paths) => [String.t()],
           optional(:timeout_ms) => timeout(),
           optional(:params) => [term()],
-          optional(:spill) => spill()
+          optional(:spill) => spill(),
+          optional(:read_bytes) => boolean()
         }
 
   @typedoc """
@@ -209,7 +211,9 @@ defmodule Smolquery.QueryService.PartialWorker do
   it, and its timings (T-691): where the engine came from and how long it
   took, the field-id description, the scan, and `worker_us`, the whole of
   the worker's time from engine to reply, so a coordinator knows what of a
-  shard's span was the worker and what was the wire.
+  shard's span was the worker and what was the wire. `read` is what the
+  shard fetched over HTTP as `Smolquery.QueryService.ReadBytes` measured it
+  (T-706), when the request asked with `read_bytes`; `nil` otherwise.
   """
   @type reply :: %{
           required(:parquet) => binary() | nil,
@@ -218,6 +222,7 @@ defmodule Smolquery.QueryService.PartialWorker do
           required(:rows) => non_neg_integer(),
           required(:file_cache) => FileCache.decision(),
           required(:node) => node(),
+          optional(:read) => ReadBytes.measured() | nil,
           required(:timings) => %{
             engine_us: non_neg_integer(),
             describe_us: non_neg_integer(),
@@ -377,6 +382,7 @@ defmodule Smolquery.QueryService.PartialWorker do
       with :ok <- output_directory(directory),
            :ok <- apply_statements(engine.connection, plan.settings),
            :ok <- apply_statements(engine.connection, plan.functions),
+           logging = read_logging(engine.connection, request),
            {describe_us, {:ok, files}} <-
              Telemetry.timed(fn -> described(engine.connection, request.files) end),
            :ok <-
@@ -406,6 +412,7 @@ defmodule Smolquery.QueryService.PartialWorker do
            rows: rows,
            file_cache: decision,
            node: node(),
+           read: measured_read(engine.connection, logging),
            timings: %{
              engine: source,
              engine_us: engine_us,
@@ -423,6 +430,18 @@ defmodule Smolquery.QueryService.PartialWorker do
       File.rm_rf(directory)
     end
   end
+
+  defp read_logging(connection, %{read_bytes: true}), do: ReadBytes.enable(connection) == :ok
+  defp read_logging(_connection, _unasked), do: false
+
+  defp measured_read(connection, true) do
+    case ReadBytes.measure(connection) do
+      {:ok, measured} -> measured
+      {:error, _unreadable} -> nil
+    end
+  end
+
+  defp measured_read(_connection, false), do: nil
 
   defp output_directory_path do
     Path.join(

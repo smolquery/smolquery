@@ -736,6 +736,24 @@ end
 
 # T-626: a node-local on-disk cache of sealed-tier reads, shared by every job
 # engine. Off unless a directory is set.
+if read_bytes = System.get_env("SMOLQUERY_QUERY_READ_BYTES") do
+  config :smolquery, Smolquery.QueryService,
+    accounting: [
+      measure: Smolquery.RuntimeConfig.boolean!("SMOLQUERY_QUERY_READ_BYTES", read_bytes)
+    ]
+end
+
+if accounting = System.get_env("SMOLQUERY_QUERY_BYTES_ACCOUNTING") do
+  config :smolquery, Smolquery.QueryService,
+    accounting: [
+      by:
+        Smolquery.RuntimeConfig.enum!("SMOLQUERY_QUERY_BYTES_ACCOUNTING", accounting, [
+          :plan,
+          :measured
+        ])
+    ]
+end
+
 if directory = System.get_env("SMOLQUERY_QUERY_FILE_CACHE_DIR") do
   config :smolquery, Smolquery.QueryService, file_cache: [directory: directory]
 end

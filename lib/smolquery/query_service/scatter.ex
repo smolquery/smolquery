@@ -315,10 +315,16 @@ defmodule Smolquery.QueryService.Scatter do
         |> Enum.map(&(&1 |> Map.take(["url", "field_ids"]) |> Map.put("hot", true)))
 
       skipped = Map.get(plan.sealed_skipped, ref, MapSet.new())
+      scan_bytes = Map.get(plan.sealed_scan_bytes, ref, %{})
 
       units =
         for file <- sealed, not MapSet.member?(skipped, file.path) do
-          %{"url" => file.path, "snapshot" => file.snapshot, "bytes" => file.bytes}
+          %{
+            "url" => file.path,
+            "snapshot" => file.snapshot,
+            "bytes" => file.bytes,
+            "scan_bytes" => Map.get(scan_bytes, file.path, file.bytes)
+          }
         end ++ hot
 
       if length(units) >= runtime.distributed.min_files do
@@ -501,10 +507,23 @@ defmodule Smolquery.QueryService.Scatter do
         {:ok, frame,
          measurements
          |> Map.merge(burst)
+         |> Map.merge(%{scan_bytes: scan_bytes(shards), read_bytes: read_bytes(partials)})
          |> Map.put(:file_cache, partials |> Enum.map(& &1.decision) |> FileCache.combined())}
 
       :fallback ->
         :fallback
+    end
+  end
+
+  defp scan_bytes(shards),
+    do: Enum.sum_by(shards, fn {_target, files} -> scan_bytes_of(files) end)
+
+  defp scan_bytes_of(files), do: Enum.sum_by(files, &Map.get(&1, "scan_bytes", 0))
+
+  defp read_bytes(partials) do
+    case for(%{read: %{bytes: bytes}} <- partials, do: bytes) do
+      [] -> nil
+      measured -> Enum.sum(measured)
     end
   end
 
@@ -574,7 +593,8 @@ defmodule Smolquery.QueryService.Scatter do
       table_ref: ref,
       schema: schema,
       partial_sql: decomposition.partial_sql,
-      params: decomposition.params
+      params: decomposition.params,
+      read_bytes: runtime.accounting.measure
     }
 
     %{
@@ -827,6 +847,7 @@ defmodule Smolquery.QueryService.Scatter do
           |> landed(partials_dir, target.index)
           |> Map.merge(%{
             decision: Map.get(reply, :file_cache, runtime.file_cache.decision),
+            read: Map.get(reply, :read),
             kind: target.kind,
             index: target.index,
             wait_us: wait_us
@@ -1035,7 +1056,8 @@ defmodule Smolquery.QueryService.Scatter do
       kind: target.kind,
       files: length(files),
       hot_files: Enum.count(files, &hot?/1),
-      sealed_bytes: Enum.sum_by(files, &Map.get(&1, "bytes", 0))
+      sealed_bytes: Enum.sum_by(files, &Map.get(&1, "bytes", 0)),
+      scan_bytes: scan_bytes_of(files)
     }
 
     base = if Map.get(target, :retry), do: Map.put(base, :retry, true), else: base
@@ -1062,6 +1084,7 @@ defmodule Smolquery.QueryService.Scatter do
           node: Map.get(reply, :node, target_name(target)),
           wait_us: wait_us(elapsed_us, {:ok, reply})
         })
+        |> Map.merge(read_meta(reply))
 
       {_elapsed_us, {:ok, _older_worker}} ->
         base
@@ -1073,6 +1096,11 @@ defmodule Smolquery.QueryService.Scatter do
         Map.put(base, :error, error_text(raised))
     end
   end
+
+  defp read_meta(%{read: %{bytes: bytes, requests: requests}}),
+    do: %{read_bytes: bytes, requests: requests}
+
+  defp read_meta(_unmeasured), do: %{}
 
   defp target_name(%{kind: :peer, node: node}), do: node
   defp target_name(%{kind: :runner, pool: pool}), do: inspect(pool)
