@@ -248,10 +248,22 @@ defmodule Smolquery.QueryService.Pruner do
     stats = entry |> Map.get("stats", %{}) |> Entry.decode_stats()
     resolve = column_resolver(ids, Map.get(entry, "field_ids"))
 
-    not Enum.any?(conjuncts, fn {column, op, value} ->
-      excludes?(stats, {resolve.(column), op, value})
-    end)
+    keep_stats?(
+      stats,
+      Enum.map(conjuncts, fn {column, op, value} -> {resolve.(column), op, value} end)
+    )
   end
+
+  @doc """
+  Whether `stats`, decoded bounds keyed by the names the conjuncts use,
+  leave any chance a row matches every conjunct: what `keep?/3` decides
+  once it has resolved an entry's names, and what the sealed-file pruner
+  asks over the catalog's bounds (T-705). A column without stats never
+  excludes.
+  """
+  @spec keep_stats?(%{optional(String.t()) => %{optional(atom()) => term()}}, [conjunct()]) ::
+          boolean()
+  def keep_stats?(stats, conjuncts), do: not Enum.any?(conjuncts, &excludes?(stats, &1))
 
   defp read_once([], _statement), do: []
 

@@ -135,9 +135,11 @@ defmodule Smolquery.QueryService.PlannerIntegrationTest do
 
   test "a bound on a sorted column prunes sealed files, and the statistics count only the kept ones (T-705)",
        %{catalog: catalog, runtime: runtime, tmp_dir: tmp} do
-    seal_rows(catalog, Path.join(tmp, "segments"), 1..50)
+    first = seal_rows(catalog, Path.join(tmp, "segments"), 1..50)
     seal_rows(catalog, Path.join(tmp, "segments"), 51..100)
-    {:ok, [low, high]} = Catalog.segment_files(catalog, @table, :current)
+    {:ok, [low]} = Catalog.segment_files(catalog, @table, first)
+    {:ok, files} = Catalog.segment_files(catalog, @table, :current)
+    [high] = Enum.reject(files, &(&1.path == low.path))
 
     whole = planned(runtime, "SELECT name FROM analytics.events WHERE id > 0")
     upper = planned(runtime, "SELECT name FROM analytics.events WHERE id > 60")
