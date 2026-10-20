@@ -734,8 +734,10 @@ if directory = System.get_env("SMOLQUERY_EXTENSION_DIRECTORY") do
   config :smolquery, :extension_directory, directory
 end
 
-# T-626: a node-local on-disk cache of sealed-tier reads, shared by every job
-# engine. Off unless a directory is set.
+# T-706: how a query's bytes are accounted. `SMOLQUERY_QUERY_READ_BYTES` is
+# whether every shard engine and the job engine measure what they fetched
+# over HTTP; `SMOLQUERY_QUERY_BYTES_ACCOUNTING` is which number a query is
+# accounted for by, the plan's or the measured one.
 if read_bytes = System.get_env("SMOLQUERY_QUERY_READ_BYTES") do
   config :smolquery, Smolquery.QueryService,
     accounting: [
@@ -748,12 +750,14 @@ if accounting = System.get_env("SMOLQUERY_QUERY_BYTES_ACCOUNTING") do
     accounting: [
       by:
         Smolquery.RuntimeConfig.enum!("SMOLQUERY_QUERY_BYTES_ACCOUNTING", accounting, [
-          :plan,
-          :measured
+          {"plan", :plan},
+          {"measured", :measured}
         ])
     ]
 end
 
+# T-626: a node-local on-disk cache of sealed-tier reads, shared by every job
+# engine. Off unless a directory is set.
 if directory = System.get_env("SMOLQUERY_QUERY_FILE_CACHE_DIR") do
   config :smolquery, Smolquery.QueryService, file_cache: [directory: directory]
 end

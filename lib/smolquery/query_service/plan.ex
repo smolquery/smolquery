@@ -60,9 +60,11 @@ defmodule Smolquery.QueryService.Plan do
   deals every live file but these; the single-engine path needs nothing
   from it, since DuckLake prunes the same files itself. `sealed_scan_bytes`
   is, per table and kept file, what the query reads of it by the plan: the
-  referenced columns' bytes, or the whole file under a star (T-706); empty
-  when the planner read no per-file stats, and the scatter then weighs a
-  shard by its files' whole size.
+  referenced columns' bytes, or the whole file under a star (T-706), with
+  a `default` for a file the planner read no per-file stats for, the whole
+  file or nothing for a query that references no column, so a shard's
+  files add up to the sealed `bytes_scanned` either way. The scatter
+  reports it per shard; it still deals and sizes shards by whole files.
   """
 
   alias Smolquery.BufferService.HotClient
@@ -102,7 +104,12 @@ defmodule Smolquery.QueryService.Plan do
           statistics: Statistics.t() | nil,
           sealed_uncached_bytes: non_neg_integer(),
           sealed_skipped: %{Catalog.table_ref() => MapSet.t(String.t())},
-          sealed_scan_bytes: %{Catalog.table_ref() => %{String.t() => non_neg_integer()}},
+          sealed_scan_bytes: %{
+            Catalog.table_ref() => %{
+              files: %{String.t() => non_neg_integer()},
+              default: :file | 0
+            }
+          },
           federated: boolean(),
           federated_extensions: [atom()],
           params: [term()]

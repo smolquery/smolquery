@@ -420,8 +420,8 @@ defmodule SmolqueryClickHouse.Query do
     |> put_resp_header("x-clickhouse-summary", summary)
   end
 
-  defp scanned(%{hot: hot, sealed: sealed}),
-    do: {hot.rows_scanned + sealed.rows_scanned, hot.bytes_scanned + sealed.bytes_scanned}
+  defp scanned(%Statistics{hot: hot, sealed: sealed} = statistics),
+    do: {hot.rows_scanned + sealed.rows_scanned, Statistics.bytes_accounted(statistics)}
 
   defp scanned(_none), do: {0, 0}
 

@@ -319,7 +319,7 @@ defmodule Smolquery.QueryService.Scatter do
         |> Enum.map(&(&1 |> Map.take(["url", "field_ids"]) |> Map.put("hot", true)))
 
       skipped = Map.get(plan.sealed_skipped, ref, MapSet.new())
-      scan_bytes = Map.get(plan.sealed_scan_bytes, ref, %{})
+      scan_bytes = Map.get(plan.sealed_scan_bytes, ref, %{files: %{}, default: :file})
 
       units =
         for file <- sealed, not MapSet.member?(skipped, file.path) do
@@ -327,7 +327,7 @@ defmodule Smolquery.QueryService.Scatter do
             "url" => file.path,
             "snapshot" => file.snapshot,
             "bytes" => file.bytes,
-            "scan_bytes" => Map.get(scan_bytes, file.path, file.bytes)
+            "scan_bytes" => Map.get(scan_bytes.files, file.path, default_scan(scan_bytes, file))
           }
         end ++ hot
 
@@ -339,11 +339,14 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
+  defp default_scan(%{default: :file}, %{bytes: bytes}), do: bytes
+  defp default_scan(%{default: none}, _file), do: none
+
   defp shards(runtime, units) do
-    scan_bytes = units |> Enum.reject(&hot?/1) |> Enum.sum_by(&Map.get(&1, "bytes", 0))
+    file_bytes = units |> Enum.reject(&hot?/1) |> Enum.sum_by(&Map.get(&1, "bytes", 0))
 
     {runners, refused} =
-      case Policy.runners(runtime.burst.request, scan_bytes, runtime.burst) do
+      case Policy.runners(runtime.burst.request, file_bytes, runtime.burst) do
         {:ok, runners} -> {runners, nil}
         {:none, :off} -> {0, nil}
         {:none, reason} -> {0, reason}
@@ -525,10 +528,9 @@ defmodule Smolquery.QueryService.Scatter do
   defp scan_bytes_of(files), do: Enum.sum_by(files, &Map.get(&1, "scan_bytes", 0))
 
   defp read_bytes(partials) do
-    case for(%{read: %{bytes: bytes}} <- partials, do: bytes) do
-      [] -> nil
-      measured -> Enum.sum(measured)
-    end
+    if Enum.all?(partials, &match?(%{read: %{bytes: _bytes}}, &1)),
+      do: Enum.sum_by(partials, & &1.read.bytes),
+      else: nil
   end
 
   defp spill_key(%Runtime{burst: %{spill_prefix: prefix}}, job_id, index),

@@ -59,6 +59,10 @@ defmodule Smolquery.QueryService.StatisticsTest do
       assert Statistics.bytes_accounted(measured) == 1_500
 
       assert %{bytes_read: nil, accounting: :plan} = Statistics.read(statistics, nil, :measured)
+
+      assert Statistics.mib_accounted(measured) == 0.0
+      assert Statistics.mib_read(statistics) == nil
+      assert Statistics.mib_read(Statistics.read(statistics, 1_572_864, :plan)) == 1.5
     end
   end
 

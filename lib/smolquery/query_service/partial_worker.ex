@@ -431,16 +431,10 @@ defmodule Smolquery.QueryService.PartialWorker do
     end
   end
 
-  defp read_logging(connection, %{read_bytes: true}), do: ReadBytes.enable(connection) == :ok
+  defp read_logging(connection, %{read_bytes: true}), do: ReadBytes.enabled?(connection)
   defp read_logging(_connection, _unasked), do: false
 
-  defp measured_read(connection, true) do
-    case ReadBytes.measure(connection) do
-      {:ok, measured} -> measured
-      {:error, _unreadable} -> nil
-    end
-  end
-
+  defp measured_read(connection, true), do: ReadBytes.measured(connection)
   defp measured_read(_connection, false), do: nil
 
   defp output_directory_path do
