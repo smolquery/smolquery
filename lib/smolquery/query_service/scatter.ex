@@ -176,9 +176,13 @@ defmodule Smolquery.QueryService.Scatter do
   How a scattered job was answered: its shard count and merged partial
   bytes, how many shards ran on peers and how many on runners, the longest
   wait a runner shard spent outside its worker, why burst was refused when
-  the job asked for it, and what the shards did with the file cache.
+  the job asked for it, what the shards did with the file cache, and what
+  the scan shards read of their files by the plan and fetched over HTTP
+  (T-706).
   """
   @type answer :: %{
+          scan_bytes: non_neg_integer(),
+          read_bytes: non_neg_integer() | nil,
           shards: pos_integer(),
           partial_bytes: non_neg_integer(),
           peers: non_neg_integer(),
