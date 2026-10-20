@@ -731,20 +731,18 @@ defmodule Smolquery.QueryService.Planner do
 
   defp sealed_scanned(kept, columns) do
     bytes = Enum.sum_by(kept, & &1.bytes)
+    column_bytes = if columns == :all, do: bytes, else: Enum.sum_by(kept, & &1.column_bytes)
 
-    %{
-      files: length(kept),
-      rows: Enum.sum_by(kept, & &1.rows),
-      bytes: bytes,
-      column_bytes: if(columns == :all, do: bytes, else: Enum.sum_by(kept, & &1.column_bytes))
-    }
+    scan_counts(length(kept), Enum.sum_by(kept, & &1.rows), bytes, column_bytes)
   end
 
-  defp whole(stats, []),
-    do: %{files: stats.files, rows: stats.rows, bytes: stats.bytes, column_bytes: 0}
+  defp whole(stats, []), do: scan_counts(stats.files, stats.rows, stats.bytes, 0)
 
   defp whole(stats, _all_or_unresolved),
-    do: %{files: stats.files, rows: stats.rows, bytes: stats.bytes, column_bytes: stats.bytes}
+    do: scan_counts(stats.files, stats.rows, stats.bytes, stats.bytes)
+
+  defp scan_counts(files, rows, bytes, column_bytes),
+    do: %{files: files, rows: rows, bytes: bytes, column_bytes: column_bytes}
 
   # A table with a materialized column reads the registration snapshot of
   # each sealed file, so the view can tell which files predate the column
