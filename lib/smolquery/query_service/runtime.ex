@@ -125,6 +125,13 @@ defmodule Smolquery.QueryService.Runtime do
   directory joins `allowed_directories`, so the cache keeps working under
   lockdown.
 
+  `accounting` (T-706) is how a query's bytes are counted: `measure` says
+  whether every shard engine and the job engine turn DuckDB's `HTTP` log on
+  for the scan and report what they fetched (`true`), and `by` which of the
+  two numbers the query is accounted for, `:plan` (the catalog's referenced
+  columns over the files the planner keeps, the default) or `:measured`.
+  Both are always reported, so they can be compared.
+
   `warm_engines` (PL-50) is how many job engines
   `Smolquery.QueryService.EnginePool` keeps bootstrapped ahead of demand —
   `2` by default, `0` to start every engine cold on the request path. A
@@ -215,6 +222,7 @@ defmodule Smolquery.QueryService.Runtime do
     :allowed_directories,
     :store,
     lockdown: true,
+    accounting: %{measure: true, by: :plan},
     clickhouse_functions: true,
     buffer_name: Smolquery.BufferService,
     buffer_base_url: "http://127.0.0.1:4001",
@@ -281,6 +289,7 @@ defmodule Smolquery.QueryService.Runtime do
           history_metadata: String.t() | nil,
           allowed_directories: [String.t()],
           lockdown: boolean(),
+          accounting: %{measure: boolean(), by: :plan | :measured},
           clickhouse_functions: boolean(),
           buffer_name: atom(),
           buffer_base_url: String.t(),
@@ -393,6 +402,7 @@ defmodule Smolquery.QueryService.Runtime do
       file_cache: file_cache,
       warm_probe: Keyword.get_lazy(config, :warm_probe, fn -> warm_probe(catalog_opts) end),
       distributed: distributed(Keyword.get(config, :distributed, [])),
+      accounting: accounting(Keyword.get(config, :accounting, [])),
       burst: burst(Keyword.get(config, :burst, []))
     }
     |> struct!(Keyword.take(config, @limits))
@@ -463,6 +473,9 @@ defmodule Smolquery.QueryService.Runtime do
       worker_threads: Keyword.get(opts, :worker_threads)
     }
   end
+
+  defp accounting(opts),
+    do: %{measure: Keyword.get(opts, :measure, true), by: Keyword.get(opts, :by, :plan)}
 
   defp burst(opts) do
     policy = Keyword.merge(Smolquery.Burst.policy(), opts)

@@ -107,8 +107,10 @@ defmodule Smolquery.QueryService.Runner do
   alias Smolquery.QueryService.JobEngine
   alias Smolquery.QueryService.Lockdown
   alias Smolquery.QueryService.Planner
+  alias Smolquery.QueryService.ReadBytes
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Scatter
+  alias Smolquery.QueryService.Statistics
   alias Smolquery.QueryService.Trace
   alias Smolquery.QueryService.VariantResults
   alias Smolquery.Tracing
@@ -461,6 +463,7 @@ defmodule Smolquery.QueryService.Runner do
                  profiling(explain) ++ lockdown(runtime, plan, job_id)
              )
            end),
+         logging = read_logging(runtime, connection),
          {:ok, {result, scatter, json_columns}} <-
            Trace.span(:execute, fn ->
              outcome(
@@ -485,11 +488,32 @@ defmodule Smolquery.QueryService.Runner do
          snapshot: plan.snapshot,
          hot_members: plan.hot_members,
          duration_ms: duration,
-         statistics: plan.statistics,
+         statistics:
+           Statistics.read(
+             plan.statistics,
+             bytes_read(scatter, connection, logging),
+             runtime.accounting.by
+           ),
          file_cache: file_cache
        }}
     end
   end
+
+  defp read_logging(%Runtime{accounting: %{measure: true}}, connection),
+    do: ReadBytes.enable(connection) == :ok
+
+  defp read_logging(_runtime, _connection), do: false
+
+  defp bytes_read(%{read_bytes: bytes}, _connection, _logging) when is_integer(bytes), do: bytes
+
+  defp bytes_read(_scatter, connection, true) do
+    case ReadBytes.measure(connection) do
+      {:ok, %{bytes: bytes}} -> bytes
+      {:error, _unreadable} -> nil
+    end
+  end
+
+  defp bytes_read(_scatter, _connection, false), do: nil
 
   defp outcome(runtime, connection, plan, max_rows, nil, job_id, timeout_ms) do
     with {:ok, prepared} <- variants(connection, plan) do

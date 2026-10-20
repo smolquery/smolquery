@@ -696,7 +696,7 @@ defmodule Smolquery.QueryService.Planner do
   end
 
   defp sealed_scan(_runtime, _ref, _snapshot, %{stats: :unavailable}, _columns, _conjuncts),
-    do: %{skipped: MapSet.new()}
+    do: %{skipped: MapSet.new(), scan_bytes: %{}}
 
   defp sealed_scan(runtime, ref, snapshot, %{stats: stats, schema: schema}, columns, conjuncts) do
     ids = Smolquery.Schema.field_ids(schema) || %{}
@@ -705,17 +705,25 @@ defmodule Smolquery.QueryService.Planner do
 
     case column_stats_files(runtime, ref, snapshot, request) do
       :whole ->
-        %{stats: Map.put(stats, :scanned, whole(stats, columns)), skipped: MapSet.new()}
+        %{
+          stats: Map.put(stats, :scanned, whole(stats, columns)),
+          skipped: MapSet.new(),
+          scan_bytes: %{}
+        }
 
       {:ok, files} ->
         {kept, skipped} = Enum.split_with(files, &SealedBounds.keep?(&1, prunable, conjuncts))
 
         %{
           stats: Map.put(stats, :scanned, sealed_scanned(kept, columns)),
-          skipped: MapSet.new(skipped, & &1.path)
+          skipped: MapSet.new(skipped, & &1.path),
+          scan_bytes: Map.new(kept, &{&1.path, file_scan_bytes(&1, columns)})
         }
     end
   end
+
+  defp file_scan_bytes(%{bytes: bytes}, :all), do: bytes
+  defp file_scan_bytes(%{column_bytes: bytes}, _names), do: bytes
 
   defp column_stats_files(_runtime, _ref, _snapshot, %{sizes: [], bounds: []}), do: :whole
 
@@ -985,7 +993,8 @@ defmodule Smolquery.QueryService.Planner do
       schemas: schemas,
       non_null: Nullability.columns(query.statement, schemas),
       statistics: statistics(members, hot, tables),
-      sealed_skipped: Map.new(tables, fn {ref, %{skipped: skipped}} -> {ref, skipped} end)
+      sealed_skipped: Map.new(tables, fn {ref, %{skipped: skipped}} -> {ref, skipped} end),
+      sealed_scan_bytes: Map.new(tables, fn {ref, %{scan_bytes: bytes}} -> {ref, bytes} end)
     }
   end
 

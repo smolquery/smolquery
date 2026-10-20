@@ -173,7 +173,9 @@ defmodule SmolqueryApi.JobController do
       "burst" => Map.get(scatter, :burst, 0),
       "burstWaitMs" => Map.get(scatter, :burst_wait_ms, 0),
       "burstRefused" => refusal_json(Map.get(scatter, :burst_refused)),
-      "backend" => Map.get(scatter, :backend)
+      "backend" => Map.get(scatter, :backend),
+      "scanBytes" => Map.get(scatter, :scan_bytes, 0),
+      "readBytes" => Map.get(scatter, :read_bytes)
     }
   end
 
@@ -214,6 +216,9 @@ defmodule SmolqueryApi.JobController do
       "bytesScanned" => Statistics.bytes_scanned(statistics),
       "mibScanned" => Statistics.mib_scanned(statistics),
       "fileBytes" => Statistics.file_bytes(statistics),
+      "bytesRead" => statistics.bytes_read,
+      "bytesAccounted" => Statistics.bytes_accounted(statistics),
+      "accounting" => Atom.to_string(statistics.accounting),
       "hot" => tier_json(statistics.hot),
       "sealed" => tier_json(statistics.sealed)
     }

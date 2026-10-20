@@ -41,6 +41,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   alias Smolquery.QueryService
   alias Smolquery.QueryService.Client
   alias Smolquery.QueryService.PartialWorker
+  alias Smolquery.QueryService.Statistics
   alias Smolquery.Schema
   alias Smolquery.Schema.Field
   alias Smolquery.Segments.Store
@@ -1050,6 +1051,14 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     shards = Enum.filter(job.trace, &(&1.name == :shard))
     assert Enum.sum_by(shards, & &1.meta.files) == 5
     assert Enum.sum_by(shards, & &1.meta.hot_files) == 1
+
+    assert Enum.sum_by(shards, & &1.meta.scan_bytes) == job.statistics.sealed.bytes_scanned
+    assert Enum.all?(shards, &is_integer(&1.meta.read_bytes))
+    assert Enum.sum_by(shards, & &1.meta.read_bytes) > 0
+    assert job.scatter.scan_bytes == job.statistics.sealed.bytes_scanned
+    assert job.scatter.read_bytes == job.statistics.bytes_read
+    assert %{accounting: :plan} = job.statistics
+    assert Statistics.bytes_accounted(job.statistics) == Statistics.bytes_scanned(job.statistics)
   end
 
   test "a query that does not decompose still answers", %{distributed: distributed} do

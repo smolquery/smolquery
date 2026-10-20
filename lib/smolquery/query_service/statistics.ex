@@ -34,10 +34,23 @@ defmodule Smolquery.QueryService.Statistics do
   was cut from; the two are equal on a `SELECT *`, on the hot tier (whose
   micro-segments are small and served whole by their buffer pod), and on a
   catalog without per-column sizes.
+
+  `bytes_read` is the one engine-measured number (T-706): what the scan
+  fetched over HTTP, summed from the shards' own engines when the query
+  scattered and from the job engine when it ran on one, as
+  `Smolquery.QueryService.ReadBytes` measures it; `nil` until the query
+  has run, and for a deployment that turned the measurement off.
+
+  Both numbers are always reported, so the two accountings can be compared
+  on every job; `accounting` says which one the deployment treats as the
+  bytes the query is accounted for (`bytes_accounted/1`): `:plan`, the
+  default, bills what the catalog says the query reads and is the same
+  whatever the cache held; `:measured` bills what was fetched, and falls
+  back to the plan on a job that measured nothing.
   """
 
   @enforce_keys [:hot, :sealed]
-  defstruct [:hot, :sealed]
+  defstruct [:hot, :sealed, bytes_read: nil, accounting: :plan]
 
   @typedoc """
   One tier's scan counts: files the planner considered, files the plan keeps,
@@ -52,7 +65,12 @@ defmodule Smolquery.QueryService.Statistics do
           file_bytes: non_neg_integer()
         }
 
-  @type t :: %__MODULE__{hot: tier(), sealed: tier()}
+  @type t :: %__MODULE__{
+          hot: tier(),
+          sealed: tier(),
+          bytes_read: non_neg_integer() | nil,
+          accounting: :plan | :measured
+        }
 
   @doc """
   Statistics from the two tiers' counts.
@@ -108,6 +126,29 @@ defmodule Smolquery.QueryService.Statistics do
   @spec bytes_scanned(t()) :: non_neg_integer()
   def bytes_scanned(%__MODULE__{hot: hot, sealed: sealed}),
     do: hot.bytes_scanned + sealed.bytes_scanned
+
+  @doc """
+  `statistics` with what the query fetched over HTTP once it has run, and
+  the accounting the deployment asked for, which stays `:plan` when
+  nothing was measured; `nil` stays `nil`.
+  """
+  @spec read(t() | nil, non_neg_integer() | nil, :plan | :measured) :: t() | nil
+  def read(nil, _bytes, _accounting), do: nil
+
+  def read(%__MODULE__{} = statistics, bytes, accounting) do
+    %{statistics | bytes_read: bytes, accounting: if(bytes == nil, do: :plan, else: accounting)}
+  end
+
+  @doc """
+  The bytes the query is accounted for: `bytes_read/1` under `:measured`,
+  `bytes_scanned/1` under `:plan`.
+  """
+  @spec bytes_accounted(t()) :: non_neg_integer()
+  def bytes_accounted(%__MODULE__{accounting: :measured, bytes_read: bytes})
+      when is_integer(bytes),
+      do: bytes
+
+  def bytes_accounted(%__MODULE__{} = statistics), do: bytes_scanned(statistics)
 
   @doc """
   The whole size of the files the plan reads, both tiers.
