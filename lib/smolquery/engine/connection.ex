@@ -117,6 +117,7 @@ defmodule Smolquery.Engine.Connection do
   require Logger
 
   alias Smolquery.Engine.ExtensionLoader
+  alias Smolquery.Engine.IpcSchema
   alias Smolquery.Engine.Params
   alias Smolquery.Engine.Result
   alias Smolquery.Engine.ResultTooLarge
@@ -129,6 +130,9 @@ defmodule Smolquery.Engine.Connection do
   @locked_wait_ms 25
 
   @fatal_markers ["database has been invalidated", "FATAL Error", "INTERNAL Error"]
+  @unconvertible_arrow "Arrow error: the engine cannot convert a column of the result to Arrow"
+  @unloadable_arrow "Arrow error: Polars cannot load a column of the result, " <>
+                      "such as a VARIANT, which it has no type for"
   @session [TimeZone: "UTC"]
 
   @type option ::
@@ -242,27 +246,44 @@ defmodule Smolquery.Engine.Connection do
   @doc """
   Runs `sql` and returns the result as an `Explorer.DataFrame`.
 
-  The Arrow stream goes straight to Polars in Rust, so no row is ever built as an
-  Elixir term. This runs inside the connection process rather than against the ADBC
-  pid directly, so a frame read is subject to the same fatal-error policy as
-  `query/4` and holds its connection for the duration — which is what it is
-  actually doing.
+  The Arrow stream is dumped to Arrow IPC (`Adbc.StreamResult.to_ipc_stream/1`)
+  and loaded into Polars (`Explorer.DataFrame.load_ipc_stream/2`), so no row is
+  ever built as an Elixir term. This runs inside the connection process rather
+  than against the ADBC pid directly, so a frame read is subject to the same
+  fatal-error policy as `query/4` and holds its connection for the duration —
+  which is what it is actually doing.
 
-  Explorer 0.12.0 reaches ADBC through a callback shape adbc 0.12.1 deprecated, so
-  every call here prints a deprecation warning from inside Explorer. The warning is
-  cosmetic and the fix belongs upstream. Routing around it through Arrow IPC —
-  `Adbc.StreamResult.to_ipc_stream/1` into `Explorer.DataFrame.load_ipc_stream/2` —
-  works and is quiet, but measured 38% slower on five million rows (388 ms against
-  282 ms) and copies the whole result through a 226 MiB binary on the way, which is
-  a poor trade for silencing a log line.
+  Both halves are dirty NIFs, which is why the frame goes through IPC rather than
+  `Explorer.DataFrame.from_query/4`. Since DuckDB 2.0 a query executes as its
+  result is read, and `from_query/4` reads it in a NIF on a normal scheduler: a
+  slow query pinned that scheduler for its whole run, stalling the timers on it,
+  a job's deadline among them, and a kill of the reader until it returned. Enough
+  concurrent frames would pin every scheduler and stall the node. The price is a
+  copy of the whole result through a binary: on DuckDB 1.x the IPC route measured
+  38% slower on five million rows (388 ms against 282 ms) through a 226 MiB
+  binary.
 
-  Explorer's spec promises an exception on error, but for an export Arrow cannot
-  make — a `VARIANT` column, which Arrow has no type for — its NIF answers a bare
-  string. That string is wrapped in an `Adbc.Error` here, so every caller sees one
-  error shape and `fatal?/1` can read it.
+  A `VARIANT` column has no Arrow type Polars reads. DuckDB 1.5 cannot
+  convert one to Arrow and fails the read with an empty message; 2.0 exports
+  it as the extension type `arrow.parquet.variant`, on which Polars' IPC
+  reader panics. Both are answered as an `Adbc.Error` whose message names
+  Arrow, so `Smolquery.QueryService.VariantResults` can tell an export
+  failure apart. Any other error raised while the result is read keeps
+  DuckDB's message, as an `Adbc.Error`, so every caller sees one error shape
+  and `fatal?/1` can read it.
 
-  A statement that selects nothing hands no Arrow batch over, and a frame built
-  from no batch has no columns: the names and types are gone (T-509). So a frame
+  A frame names each column once, and Polars' IPC reader does not refuse a
+  result that repeats a name: it panics with a batch and drops a column
+  without one. So the names are read off the IPC schema first
+  (`Smolquery.Engine.IpcSchema`), and a repeated one is answered as an
+  `Adbc.Error` saying "duplicate", which `SmolqueryPg.PgCatalog` re-selects
+  under unique labels.
+
+  Arrow IPC carries the schema before any batch, so a statement that selects
+  nothing keeps its names and types. Explorer's pointer read did not: a
+  statement that selects nothing handed it no batch, and a frame built from no
+  batch has no columns (T-509). The fallback for that stays for a frame that
+  still comes back with none, and for a return to that read. A frame
   that comes back with none is asked for once more — the statement under
   `LIMIT 0`, left-joined to one row, answers a single all-`NULL` row carrying every
   column's type, and its head of zero rows is the result. `LIMIT 0` reads no row,
@@ -380,7 +401,7 @@ defmodule Smolquery.Engine.Connection do
   @impl true
   def handle_call({:frame, sql, params}, _from, state) do
     state.adbc
-    |> Explorer.DataFrame.from_query(sql, params)
+    |> read_frame(sql, params)
     |> shaped(state.adbc, sql, params)
     |> exception_shaped()
     |> reply_or_stop(state)
@@ -423,11 +444,45 @@ defmodule Smolquery.Engine.Connection do
   defp shaped(answer, _adbc, _sql, _params), do: answer
 
   defp shape_of(adbc, sql, params) do
-    case adbc |> Explorer.DataFrame.from_query(shape_sql(sql), params) |> exception_shaped() do
+    case adbc |> read_frame(shape_sql(sql), params) |> exception_shaped() do
       {:ok, one} -> {:ok, Explorer.DataFrame.head(one, 0)}
       {:error, error} -> {:error, error}
     end
   end
+
+  defp read_frame(adbc, sql, params) do
+    with {:ok, answer} <- Adbc.Connection.query_pointer(adbc, sql, params, &ipc_frame/1),
+         do: answer
+  end
+
+  defp ipc_frame(stream) do
+    stream
+    |> Adbc.StreamResult.to_ipc_stream()
+    |> load_ipc()
+  rescue
+    error in [Adbc.Error, ArgumentError] -> {:error, described(error)}
+  end
+
+  defp described(%{message: ""}), do: %Adbc.Error{message: @unconvertible_arrow}
+  defp described(error), do: error
+
+  defp load_ipc(ipc) do
+    case ipc |> IpcSchema.field_names() |> repeated_names() do
+      [] -> Explorer.DataFrame.load_ipc_stream(ipc)
+      repeated -> {:error, %Adbc.Error{message: duplicate_columns(repeated)}}
+    end
+  rescue
+    error in ErlangError ->
+      if error.original == :nif_panicked,
+        do: {:error, %Adbc.Error{message: @unloadable_arrow}},
+        else: reraise(error, __STACKTRACE__)
+  end
+
+  defp repeated_names({:ok, names}), do: Enum.uniq(names -- Enum.uniq(names))
+  defp repeated_names(:error), do: []
+
+  defp duplicate_columns(repeated),
+    do: "duplicate column names in the result: " <> Enum.map_join(repeated, ", ", &inspect/1)
 
   defp shape_sql(sql) do
     "SELECT shape.* FROM (SELECT 1) AS one LEFT JOIN " <>

@@ -262,11 +262,29 @@ defmodule Smolquery.Engine.ConnectionTest do
       %{conn: conn}
     end
 
-    test "answers an exception, not the bare text Explorer returns", %{conn: conn} do
+    test "answers an exception naming Arrow and keeps the connection", %{conn: conn} do
       assert {:error, %Adbc.Error{message: message}} =
                Connection.frame(conn, "SELECT '1'::VARIANT")
 
       assert message =~ "Arrow"
+      assert {:ok, _still_alive} = Connection.query(conn, "SELECT 1")
+    end
+  end
+
+  describe "frame/4 on a result that repeats a column name" do
+    setup do
+      {:ok, conn} = Connection.start_link(database: @database)
+      %{conn: conn}
+    end
+
+    test "answers a duplicate error, with rows and without, and keeps the connection", %{
+      conn: conn
+    } do
+      for sql <- ["SELECT 1 AS a, 2 AS a, 3 AS b", "SELECT 1 AS a, 2 AS a, 3 AS b WHERE false"] do
+        assert {:error, %Adbc.Error{message: message}} = Connection.frame(conn, sql)
+        assert message == ~s(duplicate column names in the result: "a")
+      end
+
       assert {:ok, _still_alive} = Connection.query(conn, "SELECT 1")
     end
   end
@@ -299,7 +317,8 @@ defmodule Smolquery.Engine.ConnectionTest do
       assert {:ok, %Result{rows: [[1]]}} = Connection.query(conn, "SELECT count(*) FROM #{table}")
 
       assert {:ok, unwrappable} = Connection.frame(conn, "SELECT 1 AS n WHERE false;")
-      assert Explorer.DataFrame.n_columns(unwrappable) == 0
+      assert Explorer.DataFrame.names(unwrappable) == ["n"]
+      assert Explorer.DataFrame.n_rows(unwrappable) == 0
     end
 
     test "shape/4 answers the columns in one statement, and an error as an error (review of T-509)",
