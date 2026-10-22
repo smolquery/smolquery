@@ -75,16 +75,17 @@ defmodule Smolquery.Segments.Writer do
     * A column whose values are all null gets `nil` bounds from its
       `null_count` alone, before any bound text is read; a zero-row write
       is such a case, and its `DOUBLE` columns carry no `has_nan`.
-    * A column the `COPY` reports no top-level stats for — a `MAP` is only
-      described by its key and value leaves, whose null counts do not tell a
-      null map from an empty one — is counted with one scan of those columns
-      alone, as every column was before. So is a column whose `null_count`
-      is not an integer in text, whose bound text is present but does not
-      parse (or, for a string, is not valid UTF-8, as the manifest log is
-      JSON), and a `DOUBLE` column with values but no `has_nan`. The
-      segment's `scanned_columns` says how
-      many columns took that scan, so a type that starts falling back to it
-      shows up in the commit metrics rather than only in the flush time.
+    * A column the `COPY` reports no top-level stats for is counted with one
+      scan of those columns alone, as every column was before. So is a
+      column whose `null_count` is not an integer in text, whose bound text
+      is present but does not parse (or, for a string, is not valid UTF-8,
+      as the manifest log is JSON), and a `DOUBLE` column with values but no
+      `has_nan`. DuckDB 1.5 described a `MAP` only by its key and value
+      leaves, whose null counts do not tell a null map from an empty one,
+      so every `MAP` took the scan; 2.0 reports the map's own `null_count`.
+      The segment's `scanned_columns` says how many columns took that scan,
+      so a type that starts falling back to it shows up in the commit
+      metrics rather than only in the flush time.
 
   ## The footer is the readability gate
 

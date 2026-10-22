@@ -16,7 +16,7 @@ defmodule Smolquery.DuckDBTest do
       assert [{:duckdb, [version: version, url: url]}] = Application.fetch_env!(:adbc, :drivers)
 
       assert version == DuckDB.version()
-      assert url =~ "duckdb/releases/download/v#{DuckDB.version()}/libduckdb-"
+      assert url =~ "duckdb/releases/download/v#{DuckDB.version()}/duckdb-shared-libs-"
     end
   end
 

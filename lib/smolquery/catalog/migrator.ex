@@ -47,11 +47,12 @@ defmodule Smolquery.Catalog.Migrator do
   its compaction swaps at the new one
   (`Smolquery.Catalog.DuckLake.Format`'s guard).
 
-  DuckLake 1.5's `AUTOMATIC_MIGRATION` migrates to its own newest format,
-  which is `Smolquery.Catalog.DuckLake.Format.version/0`. An extension whose
-  newest format is past it would migrate past it, and that is not undone, so
-  a driver bump that brings one must pin the target with the attach's
-  `DUCKLAKE_VERSION` (DuckLake 2.0) along with raising `Format.version/0`.
+  `AUTOMATIC_MIGRATION` migrates to the format the attach's
+  `DUCKLAKE_VERSION` names, and `Smolquery.Catalog.DuckLake.attach_statement/4`
+  always names `Smolquery.Catalog.DuckLake.Format.version/0`. Without it,
+  DuckLake 2.0 would migrate to its own newest format (1.1-dev1), and that is
+  not undone. Moving the catalog to a newer format is raising
+  `Format.version/0`, once the swap and the reader are checked against it.
 
   The indexes `Smolquery.Catalog.Migrations.DucklakeReadIndexes` puts on
   DuckLake's tables survive a format migration: DuckLake's migrations add

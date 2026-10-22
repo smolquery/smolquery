@@ -1640,7 +1640,7 @@ defmodule Smolquery.Catalog.DuckLakeTest do
 
       assert statement ==
                ~s|ATTACH IF NOT EXISTS 'ducklake:sqlite:/data/it''s.sqlite' AS "lake" | <>
-                 ~s|(DATA_PATH '/data/seg', DATA_INLINING_ROW_LIMIT 0)|
+                 ~s|(DATA_PATH '/data/seg', DATA_INLINING_ROW_LIMIT 0, DUCKLAKE_VERSION '1.0')|
     end
 
     test "switches data inlining off so segments are always files" do
@@ -1657,12 +1657,18 @@ defmodule Smolquery.Catalog.DuckLakeTest do
              ) =~ "AUTOMATIC_MIGRATION"
     end
 
+    test "pins the catalog format to the one the swap and reader are written for" do
+      assert DuckLake.attach_statement("lake", "sqlite:/c.sqlite", "/d") =~
+               "DUCKLAKE_VERSION '#{DuckLake.Format.version()}'"
+    end
+
     test "opts into automatic migration inside the option list" do
       statement =
         DuckLake.attach_statement("lake", "sqlite:/c.sqlite", "/d", automatic_migration: true)
 
       assert statement =~
-               "(DATA_PATH '/d', DATA_INLINING_ROW_LIMIT 0, AUTOMATIC_MIGRATION TRUE)"
+               "(DATA_PATH '/d', DATA_INLINING_ROW_LIMIT 0, DUCKLAKE_VERSION '1.0', " <>
+                 "AUTOMATIC_MIGRATION TRUE)"
     end
   end
 
@@ -1740,14 +1746,6 @@ defmodule Smolquery.Catalog.DuckLakeTest do
       assert_received {:attempt, %{attempt: 1, result: :conflict}}
       assert_received {:attempt, %{result: :ok}}
       assert Catalog.clustering(catalog, @table) == {:ok, ["ts"]}
-    end
-  end
-
-  describe "allowed_configs_statement/0" do
-    test "names the three options DuckLake sets on its metadata connection, as one SET" do
-      assert DuckLake.allowed_configs_statement() ==
-               "SET allowed_configs = ['pg_experimental_filter_pushdown', " <>
-                 "'sqlite_disable_multithreaded_scans', 'current_transaction_invalidation_policy']"
     end
   end
 end

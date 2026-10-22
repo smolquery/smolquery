@@ -1,11 +1,11 @@
-# parser — DuckDB's SQL parser on the query path, 1.5.3 vs 2.0 preview
+# parser — DuckDB's SQL parser on the query path, 1.5.3 vs 2.0 (preview and release)
 
 | | |
 |---|---|
-| Run | 2026-10-10 |
+| Run | 2026-10-10 (1.5.3, alpha), 2026-10-21 (2.0.0) |
 | Commit | 390f430 + `bench/parser.exs` (T-635) |
 | Command | `REPS=500 SMOLQUERY_ROLES=query mix run bench/parser.exs`, once per driver pin |
-| Drivers | `duckdb_driver_version` 1.5.3 (main's pin), then 2.0.0-alpha38195 (T-467's preview mirror) |
+| Drivers | `duckdb_driver_version` 1.5.3, then 2.0.0-alpha38195 (T-467's preview mirror), then the 2.0.0 release (2026-10-21) |
 | Machine | AWS Graviton3 (Neoverse-V1), 8 cores, 30 GiB, Linux 6.12 (Ubuntu 24.04 userland) |
 | Runtime | Elixir 1.20.2 / OTP 29, 8 schedulers |
 
@@ -88,5 +88,46 @@ Both builds are release builds: `SELECT sum(range) FROM range(200000000)` took
   lenient, the canonical text would compare `value >= +inf` and stop matching
   the sentinel.
 
-This is one alpha (alpha38195, September); the 2.0.0 release is due 2026-10-21.
-Re-run against the release asset before the bump (T-395) and overwrite this file.
+This is one alpha (alpha38195, September). The 2.0.0 release is measured below.
+
+## DuckDB 2.0.0, the release (2026-10-21)
+
+Same command, machine and corpus, on the `duckdb-2.0.0` branch (driver pin
+2.0.0 from DuckDB's `duckdb-shared-libs-linux-arm64.tar.gz`). The planner
+statement is still the triple-parse one; parse-once (T-637) is not in yet.
+
+```
+DuckDB v2.0.0 — parse cost per statement, median of 500 (us)
+────────────────────────────────────────────────────────────
+statement                           bytes   ok  literal  serialize   parse  planner
+select 1                                8    y      550        621      71      957
+bq point lookup                        55    y      531        697     166     1246
+bq time-range aggregate               218    y      533        911     378     1904
+hyperdx rows                          233    y      548        835     287     1663
+hyperdx histogram                     418    y      549       1043     494     2374
+hyperdx rows_term                     281    y      542        917     375     1953
+hyperdx count_field_filters           348    y      534        971     437     2123
+hyperdx key_values                    331    y      544        942     398     1897
+hyperdx rows_underscore_term          371    y      540       1058     518     2406
+metricsql sum(rate)                  4520    y      623       6371    5748    19393
+metricsql quantile(max_over_time)    1215    y      579       2293    1714     6452
+metricsql avg(last_over_time)         947    y      547       1839    1292     5006
+pgjdbc getColumns                    1075    y      566       1734    1168     4492
+wide 3.6 KB                          3583    y      598       2884    2286     8296
+
+sum                                                7784      23116   15332    60162
+```
+
+- **The release's parser is 5x faster than the alpha's, and ~2.75x slower than
+  1.5.3.** Summed over the corpus, the planner statement is 60.2 ms against
+  21.9 ms on 1.5.3 and 339.9 ms on alpha38195; parse alone 15.3 ms against
+  2.9 ms and 64.3 ms.
+- **A short query pays about 0.4–1.5 ms more to plan.** The BigQuery and HyperDX
+  planner steps are 1.0–2.4 ms against 0.55–0.9 ms on 1.5.3, inside T-395's
+  "within ~2 ms" gate. MetricsQL `sum(rate)` is 19.4 ms against 6.6 ms, the
+  one statement where parse-once (T-637) would buy back real time.
+- **Every statement pays ~230 µs more.** The literal column, a trivial
+  statement, is ~540 µs against ~310 µs (and ~800 µs on the alpha).
+- **The large-double bug is fixed.** Every MetricsQL statement parses (`y`):
+  2.0.0 writes a numeric literal as its text (`"literal": {"kind": "NUMERIC",
+  "text": "1.7976931348623157e308"}`), so the sentinel round-trips.
