@@ -323,12 +323,12 @@ defmodule SmolqueryClickHouse.RewriteTest do
       assert Rewrite.call(
                "SELECT arrayExists((x) -> x.2 < x.1, arrayZip(p, c)), arrayMap(x -> x * 2, a)"
              ) ==
-               "SELECT clickhouse_arrayExists(list_transform(arrayZip(p, c), (x) -> x[2] < x[1])), list_transform(a, x -> x * 2)"
+               "SELECT clickhouse_arrayExists(list_transform(arrayZip(p, c), lambda x: x[2] < x[1])), list_transform(a, lambda x: x * 2)"
 
       assert Rewrite.call(
                "SELECT arrayFirstIndex(x -> if(x.1 > rank, 1, 0), point) AS i, arrayFilter(x -> x > 1, a)"
              ) ==
-               "SELECT clickhouse_arrayFirstIndex(list_transform(point, x -> if(x[1] > rank, 1, 0))) AS i, list_filter(a, x -> x > 1)"
+               "SELECT clickhouse_arrayFirstIndex(list_transform(point, lambda x: if(x[1] > rank, 1, 0))) AS i, list_filter(a, lambda x: x > 1)"
 
       assert Rewrite.call("SELECT arrayExists(a)") == "SELECT arrayExists(a)"
     end

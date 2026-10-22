@@ -182,8 +182,8 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
             {"anyIf(x, c)", "any_value(x) FILTER (WHERE c)"},
             {"anyOrNullIf(x, c)", "any_value(x) FILTER (WHERE c)"},
             {"sumForEach(a)",
-             "list_reduce(list(a), (acc, x) -> list_transform(list_zip(acc, x), " <>
-               "p -> coalesce(p[1], 0) + coalesce(p[2], 0)))"},
+             "list_reduce(list(a), lambda acc, x: list_transform(list_zip(acc, x), " <>
+               "lambda p: coalesce(p[1], 0) + coalesce(p[2], 0)))"},
             {"positionCaseInsensitive(h, n)", "instr(lower(h), lower(n))"},
             {"toNullable(x)", "x"},
             {"assumeNotNull(x)", "x"},
@@ -199,10 +199,10 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
             {"arrayZip(a, b)", "list_zip(a, b, true)"},
             {"arrayZipUnaligned(a, b)", "list_zip(a, b)"},
             {"arrayCumSum(a)",
-             "list_transform(range(1, len(a) + 1), i -> list_reduce(a[1:i], (x, y) -> x + y))"},
-            {"arrayWithConstant(n, v)", "list_transform(range(n), i -> v)"},
+             "list_transform(range(1, len(a) + 1), lambda i: list_reduce(a[1:i], lambda x, y: x + y))"},
+            {"arrayWithConstant(n, v)", "list_transform(range(n), lambda i: v)"},
             {"arraySum(a)",
-             "CASE WHEN coalesce(len(a), 0) = 0 THEN 0 ELSE list_reduce(a, (x, y) -> x + y) END"},
+             "CASE WHEN coalesce(len(a), 0) = 0 THEN 0 ELSE list_reduce(a, lambda x, y: x + y) END"},
             {"arrayMin(a)", "list_min(a)"},
             {"arrayMax(a)", "list_max(a)"},
             {"arrayReverse(a)", "list_reverse(a)"},
@@ -218,16 +218,17 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
             {"positiveModulo(a, m)", "((a % m) + m) % m"},
             {"exp2(x)", "power(2, x)"},
             {"clickhouse_arrayExists(bools)",
-             "coalesce(list_bool_or(list_transform(bools, b -> CAST(b AS BOOLEAN))), false)"},
+             "coalesce(list_bool_or(list_transform(bools, lambda b: CAST(b AS BOOLEAN))), false)"},
             {"clickhouse_arrayAll(bools)",
-             "coalesce(list_bool_and(list_transform(bools, b -> CAST(b AS BOOLEAN))), true)"},
+             "coalesce(list_bool_and(list_transform(bools, lambda b: CAST(b AS BOOLEAN))), true)"},
             {"clickhouse_arrayFirstIndex(bools)",
-             "coalesce(list_position(list_transform(bools, b -> CAST(b AS BOOLEAN)), true), 0)"},
-            {"clickhouse_arrayCount(bools)", "len(list_filter(bools, b -> CAST(b AS BOOLEAN)))"},
+             "coalesce(list_position(list_transform(bools, lambda b: CAST(b AS BOOLEAN)), true), 0)"},
+            {"clickhouse_arrayCount(bools)",
+             "len(list_filter(bools, lambda b: CAST(b AS BOOLEAN)))"},
             {"clickhouse_arrayMinus(a, b)",
-             "list_transform(list_zip(a, b), p -> coalesce(p[1], 0) - coalesce(p[2], 0))"},
+             "list_transform(list_zip(a, b), lambda p: coalesce(p[1], 0) - coalesce(p[2], 0))"},
             {"clickhouse_arrayPlus(a, b)",
-             "list_transform(list_zip(a, b), p -> coalesce(p[1], 0) + coalesce(p[2], 0))"}
+             "list_transform(list_zip(a, b), lambda p: coalesce(p[1], 0) + coalesce(p[2], 0))"}
           ] ++
             Enum.map(@buckets, fn {name, body} -> {name <> "(x)", body} end) ++
             Enum.flat_map(@casts, fn {name, type} ->
