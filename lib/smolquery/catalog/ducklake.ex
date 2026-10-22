@@ -248,7 +248,6 @@ defmodule Smolquery.Catalog.DuckLake do
           | {:swap_timeout_ms, timeout()}
 
   @default_catalog "lake"
-  @metadata_configs ~w(pg_experimental_filter_pushdown sqlite_disable_multithreaded_scans current_transaction_invalidation_policy)
   @commit_attempts 5
   @move_attempts 10
   @stage_abandon_ms 3_600_000
@@ -473,6 +472,12 @@ defmodule Smolquery.Catalog.DuckLake do
   5_000. With inlining off, a segment is always a file and a whole-segment
   delete always retires it.
 
+  `DUCKLAKE_VERSION` pins the catalog format to
+  `Smolquery.Catalog.DuckLake.Format.version/0`. DuckLake 2.0 otherwise
+  creates a new catalog at its own newest format (1.1-dev1), which
+  `Smolquery.Catalog.DuckLake.Swap` and `Smolquery.Catalog.DuckLake.Reader`
+  are not written for, and an automatic migration would migrate to it.
+
   ## Options
 
     * `:automatic_migration` — when `true`, adds `AUTOMATIC_MIGRATION TRUE`,
@@ -494,32 +499,8 @@ defmodule Smolquery.Catalog.DuckLake do
 
     "ATTACH IF NOT EXISTS #{Identifier.sql_string("ducklake:" <> metadata)} " <>
       "AS #{Identifier.quote_name!(catalog)} " <>
-      "(DATA_PATH #{Identifier.sql_string(data_path)}, DATA_INLINING_ROW_LIMIT 0" <>
-      "#{migration})"
-  end
-
-  @doc """
-  The `SET allowed_configs` a locked-down engine needs before
-  `lock_configuration`, so that DuckLake can still read the lake.
-
-  On every transaction DuckLake sets three options on its metadata connection:
-  `pg_experimental_filter_pushdown` off for a Postgres catalog,
-  `sqlite_disable_multithreaded_scans` on for a SQLite one, and
-  `current_transaction_invalidation_policy` after it begins the transaction.
-  A locked configuration refuses each, and the refused SET after the begin
-  invalidates the transaction, so every metadata query then fails with
-  "Current transaction is aborted". Listing the three under `allowed_configs`
-  exempts them from the lock; none of them reaches outside the engine, and
-  the list itself locks with everything else.
-
-  The three are the ones the DuckLake build for DuckDB 2.0.0-alpha38195 sets.
-  Another build may set another; DuckDB refuses `allowed_configs` and
-  `lock_configuration` themselves in the list, so it cannot unlock anything
-  else.
-  """
-  @spec allowed_configs_statement() :: String.t()
-  def allowed_configs_statement do
-    "SET allowed_configs = " <> Identifier.sql_list(@metadata_configs)
+      "(DATA_PATH #{Identifier.sql_string(data_path)}, DATA_INLINING_ROW_LIMIT 0, " <>
+      "DUCKLAKE_VERSION #{Identifier.sql_string(Format.version())}#{migration})"
   end
 
   defp ensure_metadata_dir("sqlite:" <> path), do: File.mkdir_p(Path.dirname(path))

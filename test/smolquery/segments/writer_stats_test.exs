@@ -479,7 +479,9 @@ defmodule Smolquery.Segments.WriterStatsTest do
   end
 
   describe "columns counted by a scan" do
-    test "every type but MAP is described by the COPY; each MAP is scanned", %{tmp_dir: dir} do
+    test "every type is described by the COPY, a MAP's null count apart from an empty map", %{
+      tmp_dir: dir
+    } do
       rows = [full_row(1, "b", 2.5, "2024-05-01 10:00:00.5", "2024-05-01 10:00:00"), %{"id" => 2}]
       schema = full_schema(true)
 
@@ -497,10 +499,12 @@ defmodule Smolquery.Segments.WriterStatsTest do
       assert Enum.any?(without_maps.fields, &(&1.type == :variant))
 
       {:ok, segment} = write(dir, schema, rows)
-      assert segment.scanned_columns == 1
+      assert segment.scanned_columns == 0
 
       {:ok, segment} = write(dir, two_maps, [%{"m" => %{"a" => "1"}}, %{"n" => %{}}])
-      assert segment.scanned_columns == 2
+      assert segment.scanned_columns == 0
+      assert segment.stats["m"].null_count == 1
+      assert segment.stats["n"].null_count == 1
     end
 
     test "a null_count that is not text sends the column to the scan, not the write down",

@@ -11,19 +11,15 @@ defmodule Smolquery.QueryService.Lockdown do
   engine and nothing else: with access open they bind nothing, which is why
   there is no option to keep it open (T-690). A `COPY ... TO` into an allowed
   directory still works with access closed, so a partial worker writes its
-  partial under the same lockdown a job engine runs under. Then
-  `allowed_configs` names the options DuckLake sets on its metadata
-  connection at every transaction
-  (`Smolquery.Catalog.DuckLake.allowed_configs_statement/0`), and last
-  `lock_configuration` seals everything, including that list. The order is
-  the whole point: a `SET` after the lock is refused whatever its value, so a
-  lockdown that locked before exempting DuckLake's options would fail every
-  read of the lake with "Current transaction is aborted". DuckDB's own spill
-  files are not subject to the lists; the engine spills with access closed
-  wherever its `temp_directory` points.
+  partial under the same lockdown a job engine runs under. Last,
+  `lock_configuration` seals everything: a `SET` after the lock is refused
+  whatever its value. DuckLake sets nothing on its metadata connection
+  through `SET` from the build that ships with DuckDB 2.0.0 (ducklake#1610),
+  so the lake reads under a full lock and no option is exempted. DuckDB's
+  own spill files are not subject to the lists; the engine spills with
+  access closed wherever its `temp_directory` points.
   """
 
-  alias Smolquery.Catalog.DuckLake
   alias Smolquery.Identifier
 
   @doc """
@@ -35,7 +31,6 @@ defmodule Smolquery.QueryService.Lockdown do
       "SET allowed_directories = #{Identifier.sql_list(directories)}",
       "SET allowed_paths = #{Identifier.sql_list(paths)}",
       "SET enable_external_access = false",
-      DuckLake.allowed_configs_statement(),
       "SET lock_configuration = true"
     ]
   end

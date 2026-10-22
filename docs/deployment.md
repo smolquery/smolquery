@@ -220,6 +220,20 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### Unreleased: the engine is DuckDB 2.0.0, on the DuckLake 1.0 catalog (T-395)
+
+**TL;DR.** The engine moves from DuckDB 1.5.3 to 2.0.0. The catalog stays at DuckLake format 1.0: every attach pins `DUCKLAKE_VERSION '1.0'`, so a 2.0 node neither creates nor migrates a catalog to 2.0's own format (1.1-dev1). Upgrading the catalog format is a later, separate step. Before rolling out, unset `SMOLQUERY_QUERY_FILE_CACHE_DIR`: `cache_httpfs` is not published for 2.0.0 yet.
+
+- **The catalog.** A 2.0 node reads and writes a 1.0 catalog without migrating it, and 1.5.3 reads back everything a 2.0 node wrote (checked with the 2.0 preview on SQLite and Postgres metadata, T-395). Leave `SMOLQUERY_CATALOG_AUTOMATIC_MIGRATION` unset; with the pin it would migrate to 1.0, that is, do nothing.
+- **Rolling out.** Upgrade every node of a cluster together. A 1.5.3 node renders a user's lambda as `x -> …` when it sends decomposed SQL to a peer, and a 2.0 node refuses that arrow.
+- **Rolling back.** Roll the image back. The catalog never left format 1.0, so nothing in it needs undoing.
+- **The file cache.** `SMOLQUERY_QUERY_FILE_CACHE_DIR` makes every job and shard engine load the `cache_httpfs` community extension, which is published for 1.5.3 only. With it set, every query on 2.0.0 fails. The image no longer pre-installs it. Set the variable again once the extension is published for 2.0.0.
+- **Cancelling a query no longer risks the node.** On 2.0.0, killing a process while it read a result aborted the whole VM, because adbc released the stream under the read. smolquery now builds adbc from `smolquery/adbc` (0.12.2-smolquery.2, T-708): the stream stays alive until the read returns, and stopping a job engine cancels its query through the driver, so a cancel or a timeout stops the query at once instead of letting it run out.
+- **Results read off the normal schedulers.** 2.0 runs a query while its result is read, and Explorer read it on a normal BEAM scheduler, so a slow query pinned one (T-709). Frames now read through Arrow IPC on dirty schedulers (T-710). The cost is a copy of the result: about 38% slower on a five-million-row result, measured on 1.5.
+- **What a client sees.** Lambdas are written `lambda x: …`; DuckDB 2.0 refuses `x -> …`, and the ClickHouse edge translates ClickHouse's arrow for you. A number past ~3.4e38 written as a literal parses again. An unnamed struct (a ClickHouse `tuple(…)`, `arrayZip`) answers its fields as `element1`, `element2`, … where 1.5.3 answered every field under the empty name.
+- **Latency.** Planning a short query costs about 0.4–1.5 ms more, and every statement DuckDB runs about 0.23 ms more (`bench/results/parser.md`).
+- **The lockdown is complete again.** DuckLake's 2.0 build sets nothing on its metadata connection through `SET`, so a locked engine exempts no option.
+
 ### 0.28.0: bytes scanned count the columns a query reads, over the files it keeps, beside what the engine fetched (T-704, T-705, T-706)
 
 **TL;DR.** A job's `statistics.bytesScanned`, and the query page's "scanned N MiB", now count the bytes of the columns the query references, not the whole files: `SELECT count(*)` over the 92 GB bench table reports 0, `SELECT UserID` one column's worth, `SELECT *` the old number. The old number is still there as `fileBytes`. Anything that read `bytesScanned` as a file total should read `fileBytes` now. And the planner now prunes sealed files by the catalog's per-file bounds, so a bounded query over a sorted table counts only the files it keeps, and a burst query scatters only those. Nothing to configure.

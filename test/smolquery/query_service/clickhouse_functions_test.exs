@@ -209,8 +209,13 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
          %{engine: engine} do
       assert one(engine, "arrayCumSum([1, 2, 3])") == [1, 3, 6]
       assert one(engine, "arrayCumSum(CAST([] AS BIGINT[]))") == []
-      assert one(engine, "arrayZip([1, 2], [10, 20, 30])") == [%{"" => 10}, %{"" => 20}]
-      assert one(engine, "arrayZipUnaligned([1, 2], [10])") == [%{"" => 10}, %{"" => nil}]
+
+      assert one(engine, "arrayZip([1, 2], [10, 20, 30])") ==
+               [%{"element1" => 1, "element2" => 10}, %{"element1" => 2, "element2" => 20}]
+
+      assert one(engine, "arrayZipUnaligned([1, 2], [10])") ==
+               [%{"element1" => 1, "element2" => 10}, %{"element1" => 2, "element2" => nil}]
+
       assert one(engine, "arrayZip([1, 2], [10, 20])[2][1]") == 2
       assert one(engine, "arrayWithConstant(3, toInt64(0))") == [0, 0, 0]
     end
@@ -234,7 +239,7 @@ defmodule Smolquery.QueryService.ClickHouseFunctionsTest do
       assert one(engine, "multiIf(false, 1, false, 2, false, 3, true, 4, 5)") == 4
       assert one(engine, "ifNull(NULL, 'infinity'::DOUBLE)") == :infinity
       assert one(engine, "tuple('a')") == "a"
-      assert one(engine, "tuple('a', 1)") == %{"" => 1}
+      assert one(engine, "tuple('a', 1)") == %{"element1" => "a", "element2" => 1}
       assert one(engine, "toNullable(5) + assumeNotNull(1)") == 6
     end
 

@@ -77,7 +77,7 @@ Limitations:
 
 ### `ARRAY<T>`
 
-A list of one scalar type: `ARRAY<INT64>`, `ARRAY<FLOAT64>`, `ARRAY<STRING>`, `ARRAY<BOOL>`, `ARRAY<TIMESTAMP>`, `ARRAY<TIMESTAMP_NS>` or `ARRAY<DATE>`. It is ClickHouse's `Array(T)` and DuckDB's `T[]`, the shape an OpenTelemetry histogram's `BucketCounts` and `ExplicitBounds` arrive in. Query it with DuckDB's list functions: `counts[1]` (one-based; past the end is `NULL`), `len(counts)`, `list_contains(counts, 3)`, `list_sum(counts)`, `unnest(counts)`, and lambdas such as `list_transform(counts, x -> x * 2)`.
+A list of one scalar type: `ARRAY<INT64>`, `ARRAY<FLOAT64>`, `ARRAY<STRING>`, `ARRAY<BOOL>`, `ARRAY<TIMESTAMP>`, `ARRAY<TIMESTAMP_NS>` or `ARRAY<DATE>`. It is ClickHouse's `Array(T)` and DuckDB's `T[]`, the shape an OpenTelemetry histogram's `BucketCounts` and `ExplicitBounds` arrive in. Query it with DuckDB's list functions: `counts[1]` (one-based; past the end is `NULL`), `len(counts)`, `list_contains(counts, 3)`, `list_sum(counts)`, `unnest(counts)`, and lambdas such as `list_transform(counts, lambda x: x * 2)`.
 
 Limitations:
 
