@@ -27,6 +27,15 @@ defmodule Smolquery.Engine.Connection do
   policy: this wrapper is linked to it, so both die and the supervisor rebuilds
   the subtree the same way.
 
+  ## Every DuckDB error is an `Adbc.Error`
+
+  adbc returns an error DuckDB raises while executing as an `Adbc.Error`, and
+  one it raises while the result streams as a bare string or an
+  `ArgumentError`. DuckDB 2.0 streams more of its execution, so the same
+  failure, a JSON cast in `read_json` say, arrives either way depending on
+  the build. Every reply here carries an `Adbc.Error`, so a caller sorting
+  refusals from failures reads one type.
+
   ## Spill isolation
 
   Connections default to distinct children of the application `:spill_dir`
@@ -360,6 +369,7 @@ defmodule Smolquery.Engine.Connection do
   def handle_call({:query, sql, params}, _from, state) do
     state.adbc
     |> Adbc.Connection.query(sql, params)
+    |> exception_shaped()
     |> case do
       {:ok, result} -> convert(result, state.max_rows)
       {:error, error} -> {:error, error}
@@ -428,6 +438,9 @@ defmodule Smolquery.Engine.Connection do
   defp exception_shaped({:error, message}) when is_binary(message),
     do: {:error, %Adbc.Error{message: message}}
 
+  defp exception_shaped({:error, %ArgumentError{message: message}}),
+    do: {:error, %Adbc.Error{message: message}}
+
   defp exception_shaped(other), do: other
 
   defp reply_or_stop({:ok, value}, state), do: {:reply, {:ok, value}, state}
@@ -462,12 +475,15 @@ defmodule Smolquery.Engine.Connection do
     Smolquery.Telemetry.span(
       span,
       &{%{}, %{kind: kind, result: Smolquery.Telemetry.outcome(&1)}},
-      fn -> Adbc.Connection.query(adbc, sql) end
+      fn -> adbc |> Adbc.Connection.query(sql) |> exception_shaped() end
     )
   end
 
-  defp timed(adbc, {_kind, sql}, nil), do: Adbc.Connection.query(adbc, sql)
-  defp timed(adbc, sql, _span) when is_binary(sql), do: Adbc.Connection.query(adbc, sql)
+  defp timed(adbc, {_kind, sql}, nil),
+    do: adbc |> Adbc.Connection.query(sql) |> exception_shaped()
+
+  defp timed(adbc, sql, _span) when is_binary(sql),
+    do: adbc |> Adbc.Connection.query(sql) |> exception_shaped()
 
   defp rollback(adbc, error) do
     case Adbc.Connection.query(adbc, "ROLLBACK") do

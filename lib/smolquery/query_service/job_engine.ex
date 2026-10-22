@@ -66,7 +66,11 @@ defmodule Smolquery.QueryService.JobEngine do
   @cache_fanout 8
   @cache_min_disk_bytes 1_073_741_824
 
-  @type t :: %{database: pid(), connection: pid()}
+  @type t :: %{
+          database: pid(),
+          connection: pid(),
+          cancel: Adbc.Connection.cancel_handle()
+        }
   @type source :: :warm | :cold
 
   @doc """
@@ -143,14 +147,19 @@ defmodule Smolquery.QueryService.JobEngine do
   Starts a database and a connection bootstrapped with `opts`
   (`Smolquery.Engine.Connection.start_link/1` options, minus `:database`).
 
-  A connection that fails to bootstrap takes the database with it.
+  A connection that fails to bootstrap takes the database with it. The
+  engine carries the connection's cancel handle, taken while it is idle,
+  for `stop/1`.
   """
   @spec start(keyword()) :: {:ok, t()} | {:error, term()}
   def start(opts) do
     with {:ok, database} <- DuckDB.start_link() do
       case Connection.start_link([{:database, database} | opts]) do
         {:ok, connection} ->
-          {:ok, %{database: database, connection: connection}}
+          cancel =
+            connection |> Connection.adbc_connection() |> Adbc.Connection.cancel_handle()
+
+          {:ok, %{database: database, connection: connection, cancel: cancel}}
 
         {:error, reason} ->
           Process.exit(database, :kill)
@@ -185,13 +194,19 @@ defmodule Smolquery.QueryService.JobEngine do
   end
 
   @doc """
-  Unlinks and kills both engine processes; DuckDB's in-flight work dies with
-  its connection.
+  Cancels the engine's running query, then unlinks and kills both engine
+  processes.
+
+  Killing alone does not stop DuckDB. A query runs inside a NIF, which a
+  kill does not interrupt, so it would run on until it finished, holding a
+  scheduler and DuckDB's threads. The cancel makes it fail now, through the
+  handle `start/1` took, without waiting on the busy connection process.
   """
   @spec stop(t() | nil) :: :ok
   def stop(nil), do: :ok
 
-  def stop(%{database: database, connection: connection} = engine) do
+  def stop(%{database: database, connection: connection, cancel: cancel} = engine) do
+    Adbc.Connection.cancel(cancel)
     unlink(engine)
     Process.exit(connection, :kill)
     Process.exit(database, :kill)

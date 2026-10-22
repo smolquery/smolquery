@@ -6,6 +6,12 @@ defmodule Smolquery.QueryService.JobEngineTest do
   is gone — with the `[:smolquery, :query, :engine_probe]` event for each.
   `acquire/1`'s warm and cold paths are covered with the pool, in
   `Smolquery.QueryService.EnginePoolTest`.
+
+  The test of `stop/1` cancelling a running query watches the dirty
+  schedulers, where the query runs: in adbc's execute on DuckDB 1.5, in the
+  read of the result on 2.0. A kill alone ends the engine's processes, so
+  their exit proves nothing: it is the query, left running on a dirty
+  scheduler until it finishes, that only the cancel stops.
   """
 
   use ExUnit.Case, async: false
@@ -156,6 +162,40 @@ defmodule Smolquery.QueryService.JobEngineTest do
     refute Process.alive?(engine.connection)
     refute Process.alive?(engine.database)
     assert JobEngine.stop(nil) == :ok
+  end
+
+  test "stop/1 cancels a running query rather than leaving it to run out on a dirty scheduler",
+       %{engine: engine} do
+    slow = "SELECT max(a.range * b.range) FROM range(100000) a, range(100000) b"
+    spawn(fn -> Connection.frame(engine.connection, slow, [], :infinity) end)
+    :erlang.system_flag(:scheduler_wall_time, true)
+    on_exit(fn -> :erlang.system_flag(:scheduler_wall_time, false) end)
+    Process.sleep(200)
+
+    assert dirty_busy(300) > 0.5
+    assert JobEngine.stop(engine) == :ok
+    Process.sleep(200)
+    assert dirty_busy(300) < 0.5
+  end
+
+  defp dirty_busy(ms) do
+    before = dirty_wall_time()
+    Process.sleep(ms)
+
+    dirty_wall_time()
+    |> Enum.zip(before)
+    |> Enum.map(fn {{active, total}, {active0, total0}} ->
+      (active - active0) / (total - total0)
+    end)
+    |> Enum.sum()
+  end
+
+  defp dirty_wall_time do
+    normal = :erlang.system_info(:schedulers)
+
+    for {id, active, total} <- Enum.sort(:erlang.statistics(:scheduler_wall_time_all)),
+        id > normal,
+        do: {active, total}
   end
 
   test "probe/2 answers :ok for an engine that runs the statement", context do
