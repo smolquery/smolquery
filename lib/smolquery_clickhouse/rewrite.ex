@@ -83,8 +83,9 @@ defmodule SmolqueryClickHouse.Rewrite do
     is a window function only, so it becomes the `last` aggregate, which
     the engine also runs over a window.
   - **A lambda before its array.** ClickHouse writes `arrayExists(x -> x > 1,
-    a)`; the engine writes `list_transform(a, x -> x > 1)`, and a lambda
-    cannot pass through a macro. The two arguments swap, and `arrayExists`,
+    a)`; the engine writes `list_transform(a, lambda x: x > 1)`, and a lambda
+    cannot pass through a macro. The two arguments swap, the arrow becomes
+    the engine's `lambda` keyword (DuckDB 2.0 refuses `->`), and `arrayExists`,
     `arrayAll`, `arrayFirstIndex` and `arrayCount` become a macro over the
     list the lambda answers, `arrayMap` and `arrayFilter` the engine's
     `list_transform` and `list_filter`. A form with a different arity is
@@ -162,6 +163,8 @@ defmodule SmolqueryClickHouse.Rewrite do
     "arraymap" => {:call, "list_transform"},
     "arrayfilter" => {:call, "list_filter"}
   }
+
+  @arrow ~r/\A\(?\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*\)?\s*->\s*/
 
   @doubles %{"inf" => "'infinity'::DOUBLE", "nan" => "'nan'::DOUBLE"}
 
@@ -474,7 +477,7 @@ defmodule SmolqueryClickHouse.Rewrite do
     with {:ok, arguments, after_call} <- group(rest),
          [lambda, list] <- split_arguments(arguments) do
       list = list |> drop_space() |> walk(inner(state), [])
-      lambda = lambda |> drop_space() |> walk(inner(state), [])
+      lambda = lambda |> drop_space() |> walk(inner(state), []) |> lambda_syntax()
 
       call =
         case Map.fetch!(@lambda_first, lower) do
@@ -946,6 +949,9 @@ defmodule SmolqueryClickHouse.Rewrite do
       _not_a_literal -> :error
     end
   end
+
+  defp lambda_syntax(lambda),
+    do: Regex.replace(@arrow, IO.iodata_to_binary(lambda), "lambda \\1: ")
 
   defp drop_space([{:other, text} | rest] = pieces) do
     if String.trim(text) == "", do: drop_space(rest), else: pieces
