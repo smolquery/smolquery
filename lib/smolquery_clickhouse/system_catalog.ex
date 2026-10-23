@@ -675,7 +675,7 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   defp or_kept({:error, _reason}, held), do: {:ok, :error, held}
 
   defp within?(nil, _ttl_ms), do: false
-  defp within?(at, ttl_ms), do: System.monotonic_time(:millisecond) - at <= ttl_ms
+  defp within?(at, ttl_ms), do: System.monotonic_time(:millisecond) - at < ttl_ms
 
   defp refresh(engine, catalog) do
     with {:ok, tables, left_out} <- CatalogEmulation.listing(catalog),

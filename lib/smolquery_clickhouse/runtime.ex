@@ -55,7 +55,8 @@ defmodule SmolqueryClickHouse.Runtime do
   version has not moved (`30_000`). A clustering key moves no version, and
   is seen within this. Each rebuild reads every table's schema, and every
   catalog statement waits behind it, so this is a cost to weigh on a lake of
-  many tables, not only a staleness.
+  many tables, not only a staleness. Either at `0` acts on every catalog
+  statement, two in the same millisecond included.
 
   `ingest_name` is the `Smolquery.IngestService` instance every insert goes
   through, and `query_name` the `Smolquery.QueryService` instance every
