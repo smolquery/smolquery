@@ -333,6 +333,35 @@ defmodule SmolqueryClickHouse.RewriteTest do
       assert Rewrite.call("SELECT arrayExists(a)") == "SELECT arrayExists(a)"
     end
 
+    test "a lambda moves behind a list literal, and a struct literal's commas stay inside it (T-721)" do
+      assert Rewrite.call(
+               "SELECT arrayMap(x -> x + 1, [1, 2, 3]), arrayFilter(x -> x > 1, [[1], [2, 3]][2])"
+             ) ==
+               "SELECT list_transform([1, 2, 3], lambda x: x + 1), list_filter([[1], [2, 3]][2], lambda x: x > 1)"
+
+      assert Rewrite.call("SELECT arrayExists(x -> x > 1, [1, 2, 3])") ==
+               "SELECT clickhouse_arrayExists(list_transform([1, 2, 3], lambda x: x > 1))"
+
+      assert Rewrite.call("SELECT arrayMap(x -> x['a'], [{'a': 1, 'b': 2}])") ==
+               "SELECT list_transform([{'a': 1, 'b': 2}], lambda x: x['a'])"
+
+      assert Rewrite.call("SELECT arrayMap(x -> x + 1 , [1, 2, 3] )") ==
+               "SELECT list_transform([1, 2, 3], lambda x: x + 1)"
+    end
+
+    test "unbalanced brackets leave the call as written, never a lambda inside a list (T-721)" do
+      assert Rewrite.call("SELECT arrayMap(x -> x + 1, [1, 2, 3)") =~ "arrayMap("
+      assert Rewrite.call("SELECT arrayMap(x -> x + 1, 1, 2])") =~ "arrayMap("
+    end
+
+    test "a list alias of several elements is an array, as one of one element is (T-721)" do
+      assert Rewrite.call("SELECT [1] AS a, a - a") ==
+               "SELECT [1] AS a, clickhouse_arrayMinus(a, a)"
+
+      assert Rewrite.call("SELECT [1, 2] AS a, a - a") ==
+               "SELECT [1, 2] AS a, clickhouse_arrayMinus(a, a)"
+    end
+
     test "a tuple's element reads by position" do
       assert Rewrite.call(
                "SELECT point[n].1 AS total, point[upper_idx - 1].2, t.1, 1.5, 0.95 * total"
