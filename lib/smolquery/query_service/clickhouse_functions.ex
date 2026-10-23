@@ -79,6 +79,11 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
     and `isNotNull`, which the parser keeps as words of its own.
   - The `-OrZero`, `-OrNull` and `-OrDefault` casts answer `0`, `NULL` and
     `0` for a value that does not parse, as ClickHouse's do.
+  - `JSONDynamicPathsWithTypes` joins keys with `.` and does not quote
+    them, as ClickHouse does, so a key `g.h` and a path `g` → `h` read the
+    same. DuckDB 2.0's `json_tree` quotes a key that is not a plain
+    identifier (`$."g.h"`) and 1.5 did not; the macro strips that quoting,
+    so both answer `g.h`.
   """
 
   @epoch "TIMESTAMP '1970-01-01'"
@@ -159,7 +164,7 @@ defmodule Smolquery.QueryService.ClickHouseFunctions do
             {"cityHash64(a)",
              "hash(a), (a, b) AS hash(a, b), (a, b, c) AS hash(a, b, c), (a, b, c, d) AS hash(a, b, c, d)"},
             {"JSONDynamicPathsWithTypes(x)",
-             "(SELECT map_from_entries(list((substr(node.fullkey, 3), CASE node.\"type\" WHEN 'VARCHAR' THEN 'String' WHEN 'DOUBLE' THEN 'Float64' WHEN 'BOOLEAN' THEN 'Bool' WHEN 'ARRAY' THEN 'Array(Nullable(String))' ELSE 'Int64' END) ORDER BY node.id)) FROM json_tree(CAST(x AS JSON)) AS node WHERE node.\"type\" NOT IN ('OBJECT', 'NULL') AND node.fullkey <> '$' AND NOT regexp_matches(node.path, '\\[[0-9]+\\]') AND NOT EXISTS (SELECT 1 FROM json_tree(CAST(x AS JSON)) AS holder WHERE holder.id = node.parent AND holder.\"type\" = 'ARRAY'))"},
+             "(SELECT map_from_entries(list((regexp_replace(regexp_replace(substr(node.fullkey, 3), '\"((?:[^\"\\\\]|\\\\.)*)\"', '\\1', 'g'), '\\\\([\"\\\\])', '\\1', 'g'), CASE node.\"type\" WHEN 'VARCHAR' THEN 'String' WHEN 'DOUBLE' THEN 'Float64' WHEN 'BOOLEAN' THEN 'Bool' WHEN 'ARRAY' THEN 'Array(Nullable(String))' ELSE 'Int64' END) ORDER BY node.id)) FROM json_tree(CAST(x AS JSON)) AS node WHERE node.\"type\" NOT IN ('OBJECT', 'NULL') AND node.fullkey <> '$' AND NOT regexp_matches(node.path, '\\[[0-9]+\\]') AND NOT EXISTS (SELECT 1 FROM json_tree(CAST(x AS JSON)) AS holder WHERE holder.id = node.parent AND holder.\"type\" = 'ARRAY'))"},
             {"groupUniqArrayMap(m)",
              "coalesce((SELECT map_from_entries(list((path, kinds) ORDER BY path)) FROM (SELECT entry.key AS path, list_sort(list(DISTINCT entry.value)) AS kinds FROM (SELECT unnest(flatten(list(map_entries(m)) FILTER (WHERE m IS NOT NULL))) AS entry) GROUP BY entry.key)), map_from_entries(CAST([] AS STRUCT(k VARCHAR, v VARCHAR[])[])))"},
             {"dynamicType(x)",
