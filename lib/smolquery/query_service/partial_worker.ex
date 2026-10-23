@@ -133,6 +133,7 @@ defmodule Smolquery.QueryService.PartialWorker do
   alias Smolquery.EngineSecrets
   alias Smolquery.Identifier
   alias Smolquery.QueryService.ClickHouseFunctions
+  alias Smolquery.QueryService.DescriptionCache
   alias Smolquery.QueryService.FileCache
   alias Smolquery.QueryService.JobEngine
   alias Smolquery.QueryService.Lockdown
@@ -259,7 +260,9 @@ defmodule Smolquery.QueryService.PartialWorker do
       settings: [],
       functions: functions(spec.clickhouse_functions, request.partial_sql),
       lockdown: &lockdown(spec.lockdown, spec.allowed_directories, spec.store, &1, &2),
-      store: spec.store
+      store: spec.store,
+      descriptions: nil,
+      description_entries: 1
     }
 
     case Telemetry.timed(fn -> JobEngine.start_standalone(standalone_options(spec)) end) do
@@ -360,7 +363,9 @@ defmodule Smolquery.QueryService.PartialWorker do
       settings: set_statements(limits(runtime)) ++ FileCache.statements(decision),
       functions: functions(runtime.clickhouse_functions, request.partial_sql),
       lockdown: &lockdown(runtime.lockdown, runtime.allowed_directories, runtime.store, &1, &2),
-      store: runtime.store
+      store: runtime.store,
+      descriptions: Runtime.description_cache(runtime.name),
+      description_entries: DescriptionCache.max_entries()
     }
 
     case Telemetry.timed(fn -> JobEngine.acquire(runtime) end) do
@@ -384,7 +389,7 @@ defmodule Smolquery.QueryService.PartialWorker do
            :ok <- apply_statements(engine.connection, plan.functions),
            logging = read_logging(engine.connection, request),
            {describe_us, {:ok, files}} <-
-             Telemetry.timed(fn -> described(engine, request.files, plan.settings) end),
+             Telemetry.timed(fn -> described(engine, request.files, plan) end),
            :ok <-
              apply_statements(
                engine.connection,
@@ -464,7 +469,7 @@ defmodule Smolquery.QueryService.PartialWorker do
         Views.recomputed(schema, files)
       )
 
-  defp described(engine, files, settings) do
+  defp described(engine, files, plan) do
     {unknown, known} =
       Enum.split_with(files, &(Map.get(&1, "field_ids") == nil and Map.has_key?(&1, "snapshot")))
 
@@ -473,11 +478,12 @@ defmodule Smolquery.QueryService.PartialWorker do
         {:ok, files}
 
       sealed ->
-        with(
-          {:ok, described} <-
-            ShardDescribe.files(engine, Enum.map(sealed, & &1["url"]), settings),
-          do: attach_ids(known, sealed, described)
-        )
+        {held, missing} = DescriptionCache.fetch(plan.descriptions, sealed)
+
+        with {:ok, read} <- ShardDescribe.files(engine, missing, plan.settings) do
+          :ok = DescriptionCache.put(plan.descriptions, sealed, read, plan.description_entries)
+          attach_ids(known, sealed, Map.merge(held, read))
+        end
     end
   end
 
