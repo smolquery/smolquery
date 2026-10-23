@@ -146,6 +146,22 @@ defmodule Smolquery.Catalog.DuckLakeTest do
     result.rows |> List.flatten() |> List.first()
   end
 
+  defp live_columns(schema) do
+    metadata = ~s|"__ducklake_metadata_lake"|
+
+    Engine.query!(
+      @engine,
+      "SELECT t.table_name, c.column_id, c.column_name, c.column_type " <>
+        "FROM #{metadata}.ducklake_column c " <>
+        "JOIN #{metadata}.ducklake_table t USING (table_id) " <>
+        "JOIN #{metadata}.ducklake_schema s ON s.schema_id = t.schema_id " <>
+        "WHERE s.schema_name = $1 AND s.end_snapshot IS NULL AND t.end_snapshot IS NULL " <>
+        "AND c.end_snapshot IS NULL ORDER BY c.column_id",
+      [schema]
+    ).rows
+    |> Enum.group_by(&hd/1, &tl/1)
+  end
+
   defp anonymous(%Schema{fields: fields} = schema),
     do: %{schema | fields: Enum.map(fields, &%{&1 | id: nil, since: nil})}
 
@@ -884,6 +900,25 @@ defmodule Smolquery.Catalog.DuckLakeTest do
 
       assert Catalog.create_dataset(catalog, DuckLake.Swap.stage_schema()) ==
                {:error, {:reserved_dataset, DuckLake.Swap.stage_schema()}}
+    end
+
+    test "the twin table is numbered as its table after a column was dropped and re-added (T-713)",
+         %{catalog: catalog, segments_dir: dir} do
+      :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("late", :string)})
+      :ok = Catalog.alter_table(catalog, @table, {:drop_column, "late"})
+      :ok = Catalog.alter_table(catalog, @table, {:add_column, Field.new!("late", :int64)})
+      a = write_segment(dir, 1, 10)
+      {:ok, _registered} = Catalog.register_segments(catalog, @table, [a])
+
+      assert {:ok, _swapped} =
+               Catalog.replace_segments(catalog, @table, [write_merged(dir, [{1, 10}])], [a.path])
+
+      table_columns = Map.fetch!(live_columns("analytics"), "events")
+      ids = Enum.map(table_columns, &hd/1)
+      refute ids == Enum.to_list(1..length(ids))
+
+      assert [{_twin, ^table_columns}] = Map.to_list(live_columns(DuckLake.Swap.stage_schema()))
+      assert row_count() == 10
     end
 
     test "retires a staged file an interrupted swap left behind, once it is an hour old (T-600)",

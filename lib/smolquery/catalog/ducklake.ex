@@ -1116,8 +1116,7 @@ defmodule Smolquery.Catalog.DuckLake do
     with :ok <-
            transact(config, [
              "CREATE SCHEMA IF NOT EXISTS #{stage}",
-             "DROP TABLE IF EXISTS #{twin}",
-             "CREATE TABLE #{twin} AS SELECT * FROM #{name} LIMIT 0"
+             "DROP TABLE IF EXISTS #{twin}" | Swap.twin_statements(name, twin, columns)
            ]),
          {:ok, id} <- table_id(config, stage_ref),
          {:ok, stage_columns} <- columns(config, id) do
