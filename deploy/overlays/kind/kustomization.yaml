@@ -6,6 +6,9 @@ resources:
   - deps
   - external-service.yaml
 
+components:
+  - ../../components/kind-data-owner
+
 images:
   - name: smolquery
     newTag: dev

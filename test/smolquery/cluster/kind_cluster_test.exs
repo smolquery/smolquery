@@ -77,6 +77,34 @@ defmodule Smolquery.Cluster.KindClusterTest do
       end
     end
 
+    test "every role's pod runs as smolquery, which cannot write the CA bundle (T-722)" do
+      for pod <- ["smolquery-api-0", "smolquery-buffer-0", "smolquery-storage-0"] do
+        answer =
+          Kind.kubectl!([
+            "exec",
+            pod,
+            "-c",
+            "smolquery",
+            "--",
+            "sh",
+            "-c",
+            "id -u; test -w /data && echo data-writable"
+          ])
+
+        assert answer |> String.split("\n", trim: true) |> Enum.take(-2) ==
+                 ["10001", "data-writable"],
+               "#{pod}: #{answer}"
+
+        bundle = "Smolquery.Engine.CaBundle.path()"
+
+        assert Kind.rpc!(pod, "IO.puts(#{bundle} != nil)") == "true", pod
+
+        assert Kind.rpc!(pod, "IO.puts(Smolquery.Engine.CaBundle.writable?(#{bundle}))") ==
+                 "false",
+               "#{pod} can write its CA bundle"
+      end
+    end
+
     test "answers a query whose tables two different buffer nodes own", context do
       %{dataset: dataset, first: first, second: second, tables: tables} = context
 

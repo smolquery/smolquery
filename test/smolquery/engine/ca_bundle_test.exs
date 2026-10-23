@@ -35,4 +35,16 @@ defmodule Smolquery.Engine.CaBundleTest do
   test "the node's bundle is one of the files it searched" do
     assert CaBundle.path() in [System.get_env("SSL_CERT_FILE"), nil | CaBundle.candidates()]
   end
+
+  test "writable?/1 is whether this node's user may write the file (T-722)", %{tmp_dir: dir} do
+    own = Path.join(dir, "own.pem")
+    File.write!(own, "pem")
+    read_only = Path.join(dir, "read-only.pem")
+    File.write!(read_only, "pem")
+    File.chmod!(read_only, 0o444)
+
+    assert CaBundle.writable?(own)
+    refute CaBundle.writable?(read_only)
+    refute CaBundle.writable?(Path.join(dir, "missing.pem"))
+  end
 end

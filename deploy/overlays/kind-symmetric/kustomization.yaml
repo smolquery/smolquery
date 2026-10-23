@@ -10,6 +10,10 @@ resources:
   - server.yaml
   - external-service.yaml
 
+components:
+  - ../../components/non-root
+  - ../../components/kind-data-owner
+
 # The front-door Service comes from base/core pointing at the api pod; here
 # every server answers it.
 patches:

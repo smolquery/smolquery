@@ -1,0 +1,29 @@
+# kind's local-path volumes are hostPath directories, and the kubelet applies
+# no fsGroup to hostPath. A cluster first brought up before T-722 holds a
+# root-owned /data the smolquery user (10001) cannot write, so on kind an
+# init container gives /data to it before the node starts. The image is the
+# postgres one the pods already pull for wait-for-postgres.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+  - target:
+      kind: StatefulSet
+      name: smolquery-.*
+    patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: smolquery
+      spec:
+        template:
+          spec:
+            initContainers:
+              - name: data-owner
+                image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+                command: ["sh", "-c", "chown -R 10001:10001 /data"]
+                securityContext:
+                  runAsUser: 0
+                volumeMounts:
+                  - name: data
+                    mountPath: /data
