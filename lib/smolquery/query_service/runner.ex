@@ -90,6 +90,12 @@ defmodule Smolquery.QueryService.Runner do
   other per-connection statements and before the lockdown seals the
   configuration: from DuckDB 2.0 the analyzed plan over the C API is only the
   message that profiling is disabled unless `enable_profiling` is set.
+
+  A job that measures what it read turns `HTTP` logging on
+  (`Smolquery.QueryService.ReadBytes`) after those statements and before the
+  lockdown too. `enable_logging` is a configuration change: DuckDB 1.5 let it
+  through a locked configuration, 2.0 refuses it, and a job that asked after
+  the lock would report no bytes read at all.
   """
 
   use GenServer, restart: :temporary
@@ -453,17 +459,10 @@ defmodule Smolquery.QueryService.Runner do
 
   defp execute_plan(runtime, connection, plan, explain, job_id, timeout_ms, started) do
     with :ok <- federated_extension(connection, plan),
-         :ok <-
+         {:ok, logging} <-
            Trace.span(:statements, fn ->
-             run_statements(
-               connection,
-               plan,
-               plan.statements ++
-                 FileCache.statements(runtime.file_cache.decision) ++
-                 profiling(explain) ++ lockdown(runtime, plan, job_id)
-             )
+             prepare_engine(runtime, connection, plan, explain, job_id)
            end),
-         logging = read_logging(runtime, connection),
          {:ok, {result, scatter, json_columns}} <-
            Trace.span(:execute, fn ->
              outcome(
@@ -496,6 +495,17 @@ defmodule Smolquery.QueryService.Runner do
            ),
          file_cache: file_cache
        }}
+    end
+  end
+
+  defp prepare_engine(runtime, connection, plan, explain, job_id) do
+    settings =
+      plan.statements ++ FileCache.statements(runtime.file_cache.decision) ++ profiling(explain)
+
+    with :ok <- run_statements(connection, plan, settings),
+         logging = read_logging(runtime, connection),
+         :ok <- run_statements(connection, plan, lockdown(runtime, plan, job_id)) do
+      {:ok, logging}
     end
   end
 

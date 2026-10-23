@@ -47,6 +47,10 @@ defmodule Smolquery.QueryService.ReadBytes do
   @doc """
   Turns `HTTP` logging on for `connection`'s engine, in memory, and says
   whether it is on.
+
+  Call it before the engine's lockdown (`Smolquery.QueryService.Lockdown`).
+  `enable_logging` changes the configuration, and DuckDB 2.0 refuses it once
+  `lock_configuration` is set, where 1.5 let it through.
   """
   @spec enabled?(GenServer.server()) :: boolean()
   def enabled?(connection),
