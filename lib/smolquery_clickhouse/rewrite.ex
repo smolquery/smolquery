@@ -303,14 +303,8 @@ defmodule SmolqueryClickHouse.Rewrite do
   defp with_items([:comma | rest], item, items, 0),
     do: with_items(rest, [], [with_item(item) | items], 0)
 
-  defp with_items([:open | rest], item, items, depth),
-    do: with_items(rest, [:open | item], items, depth + 1)
-
-  defp with_items([:close | rest], item, items, depth),
-    do: with_items(rest, [:close | item], items, depth - 1)
-
   defp with_items([piece | rest], item, items, depth),
-    do: with_items(rest, [piece | item], items, depth)
+    do: with_items(rest, [piece | item], items, depth + depth_change(piece))
 
   defp with_item(reversed) do
     item = Enum.reverse(reversed)
@@ -476,8 +470,8 @@ defmodule SmolqueryClickHouse.Rewrite do
        when is_map_key(@lambda_first, lower) do
     with {:ok, arguments, after_call} <- group(rest),
          [lambda, list] <- split_arguments(arguments) do
-      list = list |> drop_space() |> walk(inner(state), [])
-      lambda = lambda |> drop_space() |> walk(inner(state), []) |> lambda_syntax()
+      list = list |> trimmed() |> walk(inner(state), [])
+      lambda = lambda |> trimmed() |> walk(inner(state), []) |> lambda_syntax()
 
       call =
         case Map.fetch!(@lambda_first, lower) do
@@ -693,17 +687,33 @@ defmodule SmolqueryClickHouse.Rewrite do
   end
 
   defp split_arguments(pieces) do
-    pieces
-    |> Enum.reduce({0, [[]]}, fn
-      :open, {depth, [current | done]} -> {depth + 1, [[:open | current] | done]}
-      :close, {depth, [current | done]} -> {depth - 1, [[:close | current] | done]}
-      :comma, {0, groups} -> {0, [[] | groups]}
-      piece, {depth, [current | done]} -> {depth, [[piece | current] | done]}
-    end)
-    |> elem(1)
-    |> Enum.map(&Enum.reverse/1)
-    |> Enum.reverse()
+    {depth, lowest, groups} =
+      Enum.reduce(pieces, {0, 0, [[]]}, fn
+        :comma, {0, lowest, groups} ->
+          {0, lowest, [[] | groups]}
+
+        piece, {depth, lowest, [current | done]} ->
+          deeper = depth + depth_change(piece)
+          {deeper, min(lowest, deeper), [[piece | current] | done]}
+      end)
+
+    if depth == 0 and lowest == 0,
+      do: groups |> Enum.map(&Enum.reverse/1) |> Enum.reverse(),
+      else: [pieces]
   end
+
+  defp depth_change(:open), do: 1
+  defp depth_change(:close), do: -1
+
+  defp depth_change({:other, text}) do
+    for <<char <- text>>, reduce: 0 do
+      depth when char in [?[, ?{] -> depth + 1
+      depth when char in [?], ?}] -> depth - 1
+      depth -> depth
+    end
+  end
+
+  defp depth_change(_piece), do: 0
 
   defp array_aliases(pieces) do
     items = select_items(pieces, [])
@@ -766,14 +776,8 @@ defmodule SmolqueryClickHouse.Rewrite do
   defp select_list([:comma | rest], 0, current, items),
     do: select_list(rest, 0, [], [Enum.reverse(current) | items])
 
-  defp select_list([:open | rest], depth, current, items),
-    do: select_list(rest, depth + 1, [:open | current], items)
-
-  defp select_list([:close | rest], depth, current, items),
-    do: select_list(rest, depth - 1, [:close | current], items)
-
   defp select_list([piece | rest], depth, current, items),
-    do: select_list(rest, depth, [piece | current], items)
+    do: select_list(rest, depth + depth_change(piece), [piece | current], items)
 
   defp finish_items(current, items), do: Enum.reverse([Enum.reverse(current) | items])
 
@@ -869,10 +873,8 @@ defmodule SmolqueryClickHouse.Rewrite do
   defp depth_zero(pieces) do
     pieces
     |> Enum.reduce({0, []}, fn
-      :open, {depth, acc} -> {depth + 1, acc}
-      :close, {depth, acc} -> {depth - 1, acc}
-      piece, {0, acc} -> {0, [piece | acc]}
-      _nested, state -> state
+      piece, {0, acc} -> {depth_change(piece), [piece | acc]}
+      piece, {depth, acc} -> {depth + depth_change(piece), acc}
     end)
     |> elem(1)
   end
@@ -958,4 +960,17 @@ defmodule SmolqueryClickHouse.Rewrite do
   end
 
   defp drop_space(pieces), do: pieces
+
+  defp trimmed(pieces) do
+    pieces
+    |> drop_space()
+    |> trim_first(&String.trim_leading/1)
+    |> Enum.reverse()
+    |> drop_space()
+    |> trim_first(&String.trim_trailing/1)
+    |> Enum.reverse()
+  end
+
+  defp trim_first([{:other, text} | rest], trim), do: [{:other, trim.(text)} | rest]
+  defp trim_first(pieces, _trim), do: pieces
 end
