@@ -30,6 +30,13 @@ defmodule SmolqueryPg.Runtime do
 
   `query_name` is the `Smolquery.QueryService` instance every `SELECT` runs
   through.
+
+  `catalog_check_ms` is how often, at most, a statement that reads the
+  emulated catalog's lake tables (`pg_class`, `pg_attribute`, ...) reads the
+  catalog's schema version to see whether they are stale (T-720, `1_000`).
+  `catalog_rebuild_ms` is how long they may go without a rebuild when the
+  version has not moved (`30_000`): what the lake keeps beside it, such as a
+  required column, is seen within it.
   """
 
   alias Smolquery.Catalog
@@ -49,6 +56,8 @@ defmodule SmolqueryPg.Runtime do
     auth: :scram_sha_256,
     auth_timeout_ms: 30_000,
     idle_in_transaction_timeout_ms: 300_000,
+    catalog_check_ms: 1_000,
+    catalog_rebuild_ms: 30_000,
     ip: {127, 0, 0, 1},
     port: 5432
   ]
@@ -62,6 +71,8 @@ defmodule SmolqueryPg.Runtime do
           auth: :scram_sha_256 | :cleartext,
           auth_timeout_ms: pos_integer(),
           idle_in_transaction_timeout_ms: non_neg_integer(),
+          catalog_check_ms: non_neg_integer(),
+          catalog_rebuild_ms: non_neg_integer(),
           tls_cert: Path.t() | nil,
           tls_key: Path.t() | nil,
           scram: Scram.verifier(),
@@ -107,6 +118,8 @@ defmodule SmolqueryPg.Runtime do
         :auth,
         :auth_timeout_ms,
         :idle_in_transaction_timeout_ms,
+        :catalog_check_ms,
+        :catalog_rebuild_ms,
         :tls_cert,
         :tls_key,
         :ip,

@@ -24,9 +24,9 @@ defmodule SmolqueryPg.PgCatalog do
     the same two maps `current_setting` reads — the server settings in
     `SmolqueryPg.PgCatalog.Rewrite` and the session defaults in
     `SmolqueryPg.Session` — so the table and the function agree.
-  - **Generated tables**, rebuilt from `Smolquery.Catalog` when a query
-    arrives and the last build is older than `@refresh_ttl_ms`:
-    `pg_namespace` from the datasets, `pg_class` and `pg_attribute` from
+  - **Generated tables**, rebuilt from `Smolquery.Catalog` when its schema
+    has moved (below): `pg_namespace` from the datasets, `pg_class` and
+    `pg_attribute` from
     the tables and their schemas — with the full column shape a tool's
     `c.*` reads. OIDs are stable hashes of the names, so the OID `psql`
     reads in one query still resolves in its next. The views over them
@@ -50,12 +50,44 @@ defmodule SmolqueryPg.PgCatalog do
   every call runs through this server, so a refresh never interleaves with
   a read.
 
+  ## A rebuild runs when the schema moved, not every second (T-720)
+
+  Every catalog read used to rebuild the generated tables once the last
+  build was a second old, and on DuckDB 2.0 a rebuild took about 15 s: it
+  built `pg_attribute` as one `UNION ALL` of a single-row `SELECT` for each
+  column, which 2.0 binds superlinearly (2,824 branches: 35 s, against
+  416 ms for one `VALUES` list). psql's `SELECT version()`, Postgrex's type
+  bootstrap and every BI tool's schema sync waited for it.
+
+  So `pg_class` and `pg_attribute` are built from one `VALUES` list each,
+  carrying only what differs from row to row (`pg_namespace` too), and a
+  rebuild is gated as `SmolqueryClickHouse.SystemCatalog`'s is (T-529):
+
+  - **A statement that reads no lake table reads nothing of the lake.**
+    `SELECT version()`, `current_setting`, `pg_type`, Postgrex's bootstrap
+    answer from the engine alone, and still answer when the catalog cannot
+    be read. A lake table is one of the generated tables or views, or a
+    `to_regclass` call, whose macro reads `pg_class`.
+  - **Any other checks `Smolquery.Catalog.schema_version/1` at most once in
+    the runtime's `catalog_check_ms`**, and only a moved version rebuilds.
+  - **A rebuild is not trusted until a second one agrees with it**, because
+    what the lake keeps beside a column (that it is required) is written
+    after the version moves, and a rebuild that left a table out is not
+    trusted either.
+  - **What moves no version is picked up within `catalog_rebuild_ms`.**
+  - `[:smolquery, :pg, :catalog_refresh]` times every check, by `result`:
+    `:unchanged`, `:rebuilt`, `:kept` or `:error`.
+
   A rebuild that cannot read the catalog — a call that timed out behind a
   busy connection, or found it gone, answers `{:error, %CallExited{}}`
   since T-464 — is not a rebuild: the query answers
   `{:error, {:pg_catalog_unavailable, _}}`, the generated tables keep their
   last shape, and the next query tries again. An empty `pg_class` would be
-  a wrong answer a client acts on, not a failure it can retry.
+  a wrong answer a client acts on, not a failure it can retry. The rebuild
+  that `catalog_rebuild_ms` forces is the exception: the version was read and
+  has not moved, so the tables held are still the lake's, and a rebuild that
+  fails, or that would leave a table out of them, answers from what is held
+  and is tried again `catalog_rebuild_ms` later.
 
   ## The engine is locked down
 
@@ -76,15 +108,19 @@ defmodule SmolqueryPg.PgCatalog do
   use GenServer
 
   alias Explorer.DataFrame
+  alias Smolquery.Catalog
   alias Smolquery.CatalogEmulation
   alias Smolquery.Engine
   alias Smolquery.Engine.Frame
   alias Smolquery.Identifier
+  alias Smolquery.Telemetry
   alias SmolqueryPg.PgCatalog.Rewrite
   alias SmolqueryPg.Runtime
   alias SmolqueryPg.Session
 
-  @refresh_ttl_ms 1_000
+  @lake_tables ~w(pg_namespace pg_class pg_attribute is_tables is_schemata is_columns
+                  is_table_privileges pg_tables pg_stat_all_tables pg_stat_user_tables)
+  @lake_information_schema ~w(tables schemata columns table_privileges)
   @lockdown [
     "SET autoinstall_known_extensions = false",
     "SET autoload_known_extensions = false",
@@ -185,7 +221,15 @@ defmodule SmolqueryPg.PgCatalog do
     create_static_views(engine)
     Enum.each(@lockdown, &Engine.query!(engine, &1))
 
-    {:ok, %{runtime: runtime, engine: engine, refreshed_at: 0}}
+    {:ok,
+     %{
+       runtime: runtime,
+       engine: engine,
+       checked_at: nil,
+       rebuilt_at: nil,
+       version: nil,
+       settled?: false
+     }}
   end
 
   @impl GenServer
@@ -200,9 +244,9 @@ defmodule SmolqueryPg.PgCatalog do
   end
 
   def handle_call({:query, sql, settings, params}, _from, state) do
-    with {:ok, state} <- ensure_fresh(state),
-         {:ok, _ast, canonical} <-
+    with {:ok, ast, canonical} <-
            CatalogEmulation.serialize(state.engine, Rewrite.pre(sql, settings)),
+         {:ok, state} <- fresh(state, reads_lake?(ast, canonical)),
          {:ok, frame} <- run(state.engine, Rewrite.post(canonical), params) do
       {:reply, {:ok, columns(frame), rows(frame)}, state}
     else
@@ -279,18 +323,77 @@ defmodule SmolqueryPg.PgCatalog do
     end)
   end
 
-  defp ensure_fresh(state) do
-    now = System.monotonic_time(:millisecond)
+  defp reads_lake?(ast, canonical) do
+    Enum.any?(CatalogEmulation.base_tables(ast), &lake_table?/1) or
+      String.contains?(String.downcase(canonical), "to_regclass(")
+  end
 
-    if now - state.refreshed_at > @refresh_ttl_ms or state.refreshed_at == 0 do
-      case refresh(state.engine, state.runtime.catalog) do
-        :ok -> {:ok, %{state | refreshed_at: now}}
-        {:error, reason} -> {:error, {:pg_catalog_unavailable, reason}}
-      end
-    else
-      {:ok, state}
+  defp lake_table?(%{"schema_name" => schema, "table_name" => table}) do
+    case {String.downcase(schema), String.downcase(table)} do
+      {"information_schema", table} -> table in @lake_information_schema
+      {_schema, table} -> table in @lake_tables
     end
   end
+
+  defp fresh(state, false), do: {:ok, state}
+  defp fresh(%{runtime: %Runtime{catalog: nil}} = state, true), do: {:ok, state}
+
+  defp fresh(state, true) do
+    if within?(state.checked_at, state.runtime.catalog_check_ms),
+      do: {:ok, state},
+      else: checked(state)
+  end
+
+  defp checked(state) do
+    event = [:smolquery, :pg, :catalog_refresh]
+
+    case Telemetry.span(event, &CatalogEmulation.refresh_metadata(&1, state.runtime.name), fn ->
+           revalidated(state)
+         end) do
+      {:ok, _result, state} -> {:ok, state}
+      {:error, reason} -> {:error, {:pg_catalog_unavailable, reason}}
+    end
+  end
+
+  defp revalidated(state) do
+    with {:ok, version} <- Catalog.schema_version(state.runtime.catalog),
+         {:ok, result, state} <- rebuilt(state, version) do
+      {:ok, result, %{state | checked_at: System.monotonic_time(:millisecond)}}
+    end
+  end
+
+  defp rebuilt(%{version: version, settled?: true} = state, version) do
+    if within?(state.rebuilt_at, state.runtime.catalog_rebuild_ms),
+      do: {:ok, :unchanged, state},
+      else: state |> rebuild(version, :settled) |> or_kept(state)
+  end
+
+  defp rebuilt(state, version), do: rebuild(state, version, :moved)
+
+  defp rebuild(state, version, why) do
+    with {:ok, tables, left_out} <- CatalogEmulation.listing(state.runtime.catalog),
+         :ok <- complete(why, left_out),
+         :ok <- rebuild_tables(state.engine, tables) do
+      {:ok, :rebuilt,
+       %{
+         state
+         | version: version,
+           rebuilt_at: System.monotonic_time(:millisecond),
+           settled?: left_out == 0 and state.version == version
+       }}
+    end
+  end
+
+  defp complete(:settled, left_out) when left_out > 0, do: {:error, {:left_out, left_out}}
+  defp complete(_why, _left_out), do: :ok
+
+  defp or_kept({:ok, result, state}, _held), do: {:ok, result, state}
+
+  defp or_kept({:error, _reason}, held),
+    do: {:ok, :kept, %{held | rebuilt_at: System.monotonic_time(:millisecond)}}
+
+  defp within?(nil, _ms), do: false
+  defp within?(at, ms), do: System.monotonic_time(:millisecond) - at < ms
 
   defp load_fixtures(engine) do
     for {file, name} <- [
@@ -585,15 +688,7 @@ defmodule SmolqueryPg.PgCatalog do
     Enum.each(statements, &Engine.query!(engine, &1))
   end
 
-  defp refresh(_engine, nil), do: :ok
-
-  defp refresh(engine, catalog) do
-    with {:ok, tables} <- CatalogEmulation.listed_tables(catalog) do
-      rebuild(engine, tables)
-    end
-  end
-
-  defp rebuild(engine, tables) do
+  defp rebuild_tables(engine, tables) do
     datasets = tables |> Enum.map(fn {dataset, _table, _schema} -> dataset end) |> Enum.uniq()
 
     Engine.transaction(engine, [
@@ -673,61 +768,74 @@ defmodule SmolqueryPg.PgCatalog do
     ])
   end
 
+  defp namespace_rows([]), do: ""
+
   defp namespace_rows(datasets) do
-    Enum.map_join(datasets, fn dataset ->
-      " UNION ALL SELECT #{namespace_oid(dataset)}, #{Identifier.sql_string(dataset)}, 10, NULL"
-    end)
+    values =
+      Enum.map_join(datasets, ", ", fn dataset ->
+        "(#{namespace_oid(dataset)}, #{Identifier.sql_string(dataset)})"
+      end)
+
+    " UNION ALL SELECT oid, nspname, 10, CAST(NULL AS VARCHAR[]) " <>
+      "FROM (VALUES #{values}) AS v(oid, nspname)"
   end
 
   defp class_rows([]), do: "SELECT * FROM pg_class WHERE FALSE"
 
   defp class_rows(tables) do
     values =
-      Enum.map_join(tables, " UNION ALL ", fn {dataset, table, schema} ->
-        "SELECT #{relation_oid(dataset, table)} AS oid, " <>
-          "#{Identifier.sql_string(table)} AS relname, " <>
-          "#{namespace_oid(dataset)} AS relnamespace, CAST('r' AS VARCHAR) AS relkind, " <>
-          "10 AS relowner, 2 AS relam, 0 AS relchecks, FALSE AS relhasindex, " <>
-          "FALSE AS relhasrules, FALSE AS relhastriggers, FALSE AS relrowsecurity, " <>
-          "FALSE AS relforcerowsecurity, FALSE AS relispartition, 0 AS reloftype, " <>
-          "0 AS reltablespace, CAST('p' AS VARCHAR) AS relpersistence, " <>
-          "CAST('d' AS VARCHAR) AS relreplident, 0 AS reltoastrelid, " <>
-          "#{length(schema.fields)} AS relnatts, CAST(-1 AS DOUBLE) AS reltuples, " <>
-          "0 AS relpages, 0 AS relfilenode, 0 AS reltype, 0 AS relallvisible, " <>
-          "FALSE AS relisshared, FALSE AS relhassubclass, TRUE AS relispopulated, " <>
-          "0 AS relfrozenxid, 0 AS relminmxid, 0 AS relrewrite, " <>
-          "CAST(NULL AS VARCHAR[]) AS relacl, CAST(NULL AS VARCHAR[]) AS reloptions, " <>
-          "CAST(NULL AS VARCHAR) AS relpartbound"
+      Enum.map_join(tables, ", ", fn {dataset, table, schema} ->
+        "(#{relation_oid(dataset, table)}, #{Identifier.sql_string(table)}, " <>
+          "#{namespace_oid(dataset)}, #{length(schema.fields)})"
       end)
 
-    values
+    "SELECT oid, relname, relnamespace, CAST('r' AS VARCHAR) AS relkind, " <>
+      "10 AS relowner, 2 AS relam, 0 AS relchecks, FALSE AS relhasindex, " <>
+      "FALSE AS relhasrules, FALSE AS relhastriggers, FALSE AS relrowsecurity, " <>
+      "FALSE AS relforcerowsecurity, FALSE AS relispartition, 0 AS reloftype, " <>
+      "0 AS reltablespace, CAST('p' AS VARCHAR) AS relpersistence, " <>
+      "CAST('d' AS VARCHAR) AS relreplident, 0 AS reltoastrelid, " <>
+      "relnatts, CAST(-1 AS DOUBLE) AS reltuples, " <>
+      "0 AS relpages, 0 AS relfilenode, 0 AS reltype, 0 AS relallvisible, " <>
+      "FALSE AS relisshared, FALSE AS relhassubclass, TRUE AS relispopulated, " <>
+      "0 AS relfrozenxid, 0 AS relminmxid, 0 AS relrewrite, " <>
+      "CAST(NULL AS VARCHAR[]) AS relacl, CAST(NULL AS VARCHAR[]) AS reloptions, " <>
+      "CAST(NULL AS VARCHAR) AS relpartbound " <>
+      "FROM (VALUES #{values}) AS v(oid, relname, relnamespace, relnatts)"
   end
 
-  defp attribute_rows([]), do: "SELECT * FROM pg_attribute WHERE FALSE"
-
   defp attribute_rows(tables) do
-    Enum.map_join(tables, " UNION ALL ", fn {dataset, table, schema} ->
-      schema.fields
-      |> Enum.with_index(1)
-      |> Enum.map_join(" UNION ALL ", fn {field, index} ->
-        {atttypid, atttypmod} = attribute_type(field.type)
-        {attlen, attbyval, attalign, attstorage} = attribute_layout(field.type)
+    case Enum.flat_map(tables, &attribute_values/1) do
+      [] -> "SELECT * FROM pg_attribute WHERE FALSE"
+      values -> attribute_select(Enum.join(values, ", "))
+    end
+  end
 
-        "SELECT #{relation_oid(dataset, table)} AS attrelid, " <>
-          "#{Identifier.sql_string(field.name)} AS attname, " <>
-          "#{atttypid} AS atttypid, #{atttypmod} AS atttypmod, #{index} AS attnum, " <>
-          "#{not field.nullable} AS attnotnull, FALSE AS attisdropped, " <>
-          "FALSE AS atthasdef, 0 AS attcollation, CAST('' AS VARCHAR) AS attidentity, " <>
-          "CAST('' AS VARCHAR) AS attgenerated, 0 AS attndims, " <>
-          "#{attlen} AS attlen, #{attbyval} AS attbyval, " <>
-          "CAST('#{attalign}' AS VARCHAR) AS attalign, " <>
-          "CAST('#{attstorage}' AS VARCHAR) AS attstorage, " <>
-          "CAST('' AS VARCHAR) AS attcompression, -1 AS attstattarget, -1 AS attcacheoff, " <>
-          "FALSE AS atthasmissing, TRUE AS attislocal, 0 AS attinhcount, " <>
-          "CAST(NULL AS VARCHAR[]) AS attacl, CAST(NULL AS VARCHAR[]) AS attoptions, " <>
-          "CAST(NULL AS VARCHAR[]) AS attfdwoptions, CAST(NULL AS VARCHAR[]) AS attmissingval"
-      end)
+  defp attribute_values({dataset, table, schema}) do
+    schema.fields
+    |> Enum.with_index(1)
+    |> Enum.map(fn {field, index} ->
+      {atttypid, atttypmod} = attribute_type(field.type)
+      {attlen, attbyval, attalign, attstorage} = attribute_layout(field.type)
+
+      "(#{relation_oid(dataset, table)}, #{Identifier.sql_string(field.name)}, " <>
+        "#{atttypid}, #{atttypmod}, #{index}, #{not field.nullable}, " <>
+        "#{attlen}, #{attbyval}, '#{attalign}', '#{attstorage}')"
     end)
+  end
+
+  defp attribute_select(values) do
+    "SELECT attrelid, attname, atttypid, atttypmod, attnum, attnotnull, " <>
+      "FALSE AS attisdropped, FALSE AS atthasdef, 0 AS attcollation, " <>
+      "CAST('' AS VARCHAR) AS attidentity, CAST('' AS VARCHAR) AS attgenerated, 0 AS attndims, " <>
+      "attlen, attbyval, CAST(attalign AS VARCHAR) AS attalign, " <>
+      "CAST(attstorage AS VARCHAR) AS attstorage, " <>
+      "CAST('' AS VARCHAR) AS attcompression, -1 AS attstattarget, -1 AS attcacheoff, " <>
+      "FALSE AS atthasmissing, TRUE AS attislocal, 0 AS attinhcount, " <>
+      "CAST(NULL AS VARCHAR[]) AS attacl, CAST(NULL AS VARCHAR[]) AS attoptions, " <>
+      "CAST(NULL AS VARCHAR[]) AS attfdwoptions, CAST(NULL AS VARCHAR[]) AS attmissingval " <>
+      "FROM (VALUES #{values}) AS v(attrelid, attname, atttypid, atttypmod, attnum, " <>
+      "attnotnull, attlen, attbyval, attalign, attstorage)"
   end
 
   defp attribute_type({:numeric, precision, scale}),
