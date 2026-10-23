@@ -19,9 +19,12 @@ defmodule Smolquery.Engine.Canceller do
   A canceller cancels once, and that is the end of it: `cancel/1` is the first
   half of stopping an engine (`Smolquery.QueryService.JobEngine.stop/1`), and
   the canceller exits after it. It is also linked to the connection and traps
-  its exit, so it cancels whatever the connection was running when the
-  connection dies, whoever killed it, and exits. Either way its exit drops the
-  handle, so the instance goes when the connection's processes do.
+  exits, so it cancels whatever the connection was running when the
+  connection dies, whoever killed it, and exits. A process that a statement
+  runs for can link itself to the canceller as well: when that process dies,
+  the statement is cancelled at once, rather than when the connection's read
+  returns and lets the connection die (T-719). Either way the canceller's exit
+  drops the handle, so the instance goes when the connection's processes do.
 
   Neither `start/1` nor `cancel/1` waits on a canceller for longer than 5
   seconds: a stop must not hang its caller, the engine pool among them.
@@ -87,7 +90,7 @@ defmodule Smolquery.Engine.Canceller do
         Adbc.Connection.cancel(handle)
         send(from, {ref, :cancelled})
 
-      {:EXIT, ^connection, _reason} ->
+      {:EXIT, _linked, _reason} ->
         Adbc.Connection.cancel(handle)
     end
   end

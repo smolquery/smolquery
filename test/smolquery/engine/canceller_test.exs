@@ -47,4 +47,22 @@ defmodule Smolquery.Engine.CancellerTest do
 
     assert_receive {:DOWN, ^monitor, :process, ^canceller, _reason}, 5_000
   end
+
+  test "a process linked to the canceller cancels the running read when it dies (T-719)", %{
+    connection: connection,
+    canceller: canceller
+  } do
+    running = Task.async(fn -> Connection.frame(connection, @slow, [], :infinity) end)
+
+    owner =
+      spawn(fn ->
+        Process.link(canceller)
+        receive(do: (:never -> :ok))
+      end)
+
+    Process.sleep(200)
+    Process.exit(owner, :kill)
+
+    assert {:error, %Adbc.Error{}} = Task.await(running, 5_000)
+  end
 end

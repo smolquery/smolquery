@@ -57,6 +57,27 @@ defmodule Smolquery.QueryService.JobEngineTest do
     assert options[:max_rows] == :infinity
   end
 
+  test "start/1 records the bootstrap another connection needs: the extensions and the SETs (T-719)" do
+    {:ok, engine} =
+      JobEngine.start(
+        extensions: [:json],
+        settings: [memory_limit: "512MB", threads: 2],
+        statements: [
+          "SET http_retries = 1",
+          "CREATE TEMP TABLE t (n INTEGER)",
+          " set http_timeout = 5"
+        ],
+        max_rows: :infinity
+      )
+
+    on_exit(fn -> JobEngine.stop(engine) end)
+
+    assert engine.bootstrap == [
+             extensions: [:json],
+             statements: ["SET http_retries = 1", " set http_timeout = 5"]
+           ]
+  end
+
   test "options/1 loads no cache unless the runtime names a file cache directory", %{
     runtime: runtime
   } do
