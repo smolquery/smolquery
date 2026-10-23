@@ -61,21 +61,11 @@ defmodule Smolquery.CatalogEmulation do
   defp child_tables(node), do: Enum.flat_map(Map.values(node), &base_tables/1)
 
   @doc """
-  Every table of `catalog` with its schema.
+  Every table of `catalog` with its schema, and how many tables it left out.
 
-  A table dropped between the listing and its schema read is left out. A
-  catalog that could not be asked at all (`%CallExited{}`, T-464) is an
+  A catalog that could not be asked at all (`%CallExited{}`, T-464) is an
   error, never an empty list: an emulated catalog with no tables is a wrong
   answer a client acts on, not a failure it can retry.
-  """
-  @spec listed_tables(Catalog.t()) ::
-          {:ok, [{String.t(), String.t(), Schema.t()}]} | {:error, term()}
-  def listed_tables(catalog) do
-    with {:ok, entries, _left_out} <- listing(catalog), do: {:ok, entries}
-  end
-
-  @doc """
-  `listed_tables/1`, with how many tables it left out.
 
   A table is left out when its schema could not be read, and a table dropped
   meanwhile is only one way that happens: a failed statement reads the same.
@@ -106,4 +96,15 @@ defmodule Smolquery.CatalogEmulation do
       {:error, _dropped_meanwhile} -> :skip
     end
   end
+
+  @doc """
+  The measurements and metadata a catalog check's telemetry span reports:
+  the check's own `result` (`:unchanged`, `:rebuilt`, ...) when it answered,
+  `:error` when it did not, and the edge instance's `name`. Shared by
+  `SmolqueryClickHouse.SystemCatalog` and `SmolqueryPg.PgCatalog` (T-529,
+  T-720).
+  """
+  @spec refresh_metadata(term(), atom()) :: {map(), map()}
+  def refresh_metadata({:ok, result, _state}, name), do: {%{}, %{result: result, name: name}}
+  def refresh_metadata(_failed, name), do: {%{}, %{result: :error, name: name}}
 end

@@ -633,7 +633,9 @@ defmodule SmolqueryClickHouse.SystemCatalog do
   defp checked(state) do
     event = [:smolquery, :clickhouse, :catalog_refresh]
 
-    case Telemetry.span(event, &refreshed(&1, state.runtime.name), fn -> revalidated(state) end) do
+    case Telemetry.span(event, &CatalogEmulation.refresh_metadata(&1, state.runtime.name), fn ->
+           revalidated(state)
+         end) do
       {:ok, _result, state} -> {:ok, state}
       {:error, reason} -> {:error, reason}
     end
@@ -647,9 +649,6 @@ defmodule SmolqueryClickHouse.SystemCatalog do
       {:error, _reason} -> {:error, :catalog_unavailable}
     end
   end
-
-  defp refreshed({:ok, result, _state}, name), do: {%{}, %{result: result, name: name}}
-  defp refreshed(_failed, name), do: {%{}, %{result: :error, name: name}}
 
   defp rebuilt(%{version: version, settled?: true} = state, version) do
     if within?(state.rebuilt_at, state.runtime.catalog_rebuild_ms),

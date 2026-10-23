@@ -50,19 +50,17 @@ defmodule Smolquery.CatalogEmulationTest do
     end
   end
 
-  describe "listed_tables/1" do
-    test "answers every table with its schema" do
+  describe "listing/1" do
+    test "answers every table with its schema, and none left out" do
       catalog = MapCatalog.new()
       :ok = Catalog.create_dataset(catalog, "analytics")
       schema = Schema.new!([{"id", :int64}])
       :ok = Catalog.create_table(catalog, {"analytics", "events"}, schema)
 
-      assert {:ok, [{"analytics", "events", %Schema{fields: [%{name: "id"}]}}]} =
-               CatalogEmulation.listed_tables(catalog)
+      assert {:ok, [{"analytics", "events", %Schema{fields: [%{name: "id"}]}}], 0} =
+               CatalogEmulation.listing(catalog)
     end
-  end
 
-  describe "listing/1" do
     test "counts the tables whose schema could not be read, and fails when the catalog could not be asked" do
       catalog = MapCatalog.new()
       :ok = Catalog.create_dataset(catalog, "analytics")
@@ -80,6 +78,16 @@ defmodule Smolquery.CatalogEmulationTest do
 
       assert {:error, %CallExited{}} =
                CatalogEmulation.listing(ExitingCatalog.new(catalog, table_schema: clicks))
+    end
+  end
+
+  describe "refresh_metadata/2" do
+    test "a check's own result when it answered, :error when it did not" do
+      assert CatalogEmulation.refresh_metadata({:ok, :rebuilt, %{}}, :edge) ==
+               {%{}, %{result: :rebuilt, name: :edge}}
+
+      assert CatalogEmulation.refresh_metadata({:error, :catalog_unavailable}, :edge) ==
+               {%{}, %{result: :error, name: :edge}}
     end
   end
 end

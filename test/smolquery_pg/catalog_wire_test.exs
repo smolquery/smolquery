@@ -50,7 +50,8 @@ defmodule SmolqueryPg.CatalogWireTest do
        password: @password,
        query_name: query,
        port: 0,
-       catalog: catalog},
+       catalog: catalog,
+       catalog_check_ms: 50},
       id: pg
     )
 
@@ -301,17 +302,6 @@ defmodule SmolqueryPg.CatalogWireTest do
     assert %{errors: [], results: [%{rows: []}]} = PgClient.query(socket, indexes)
   end
 
-  test "a new table appears after the refresh TTL", %{socket: socket, catalog: catalog} do
-    :ok = Catalog.create_table(catalog, {"analytics", "clicks"}, Schema.new!([{"id", :int64}]))
-
-    Process.sleep(1_100)
-
-    assert %{results: [%{rows: rows}]} =
-             PgClient.query(socket, "SELECT relname FROM pg_class ORDER BY relname")
-
-    assert ["clicks"] in rows
-  end
-
   test "answers the session functions and information_schema", %{socket: socket} do
     assert %{results: [%{rows: [[version]]}]} = PgClient.query(socket, "SELECT version()")
     assert version =~ "PostgreSQL 14.10"
@@ -545,5 +535,104 @@ defmodule SmolqueryPg.CatalogWireTest do
 
     assert %{errors: [%{"C" => "42P01"}]} =
              PgClient.query(socket, "SELECT * FROM analytics.missing")
+  end
+
+  test "a catalog read rebuilds only when the schema moved, then once more to settle (T-720)",
+       %{socket: socket, catalog: catalog} do
+    relnames = fn ->
+      PgClient.query(socket, "SELECT relname FROM pg_catalog.pg_class ORDER BY relname").results
+    end
+
+    assert [%{rows: [["events"]]}] = relnames.()
+    Process.sleep(60)
+    assert [%{rows: [["events"]]}] = relnames.()
+    settled = MapCatalog.schema_reads(catalog)
+
+    Process.sleep(60)
+    assert [%{rows: [["events"]]}] = relnames.()
+    assert MapCatalog.schema_reads(catalog) == settled
+
+    :ok = Catalog.create_table(catalog, {"analytics", "sessions"}, Schema.new!([{"id", :int64}]))
+    Process.sleep(60)
+    assert [%{rows: [["events"], ["sessions"]]}] = relnames.()
+    assert MapCatalog.schema_reads(catalog) > settled
+  end
+
+  test "a catalog of thousands of columns builds in one VALUES list, not a UNION ALL chain (T-720)",
+       %{socket: socket, catalog: catalog} do
+    schema = Schema.new!(for n <- 1..10, do: {"c#{n}", :int64})
+
+    for n <- 1..300,
+        do: :ok = Catalog.create_table(catalog, {"analytics", "wide_#{n}"}, schema)
+
+    {elapsed_us, answer} =
+      :timer.tc(fn -> PgClient.query(socket, "SELECT count(*) FROM pg_catalog.pg_attribute") end)
+
+    assert %{errors: [], results: [%{rows: [["3003"]]}]} = answer
+    assert elapsed_us < 10_000_000
+  end
+
+  test "a statement that reads no lake table answers when the catalog cannot be read (T-720)",
+       context do
+    unique = :erlang.unique_integer([:positive])
+    pg = :"pg_catalog_static_#{unique}"
+    wedged = ExitingCatalog.new(context.catalog, [:schema_version, :tables, :list_datasets])
+
+    start_supervised!(
+      {SmolqueryPg.Supervisor,
+       name: pg,
+       auth: :cleartext,
+       password: @password,
+       query_name: :"pg_catalog_query_#{unique}",
+       port: 0,
+       catalog: wedged},
+      id: pg
+    )
+
+    on_exit(fn -> Runtime.delete(pg) end)
+    {:ok, {_ip, port}} = SmolqueryPg.Supervisor.bound(pg)
+    {:ok, socket, _params} = PgClient.connect(port, password: @password)
+
+    assert %{errors: [], results: [%{rows: [[version]]}]} =
+             PgClient.query(socket, "SELECT version()")
+
+    assert version =~ "PostgreSQL"
+
+    assert %{errors: [], results: [%{rows: [["int8"]]}]} =
+             PgClient.query(socket, "SELECT typname FROM pg_catalog.pg_type WHERE oid = 20")
+
+    assert %{errors: [%{"M" => message}]} =
+             PgClient.query(socket, "SELECT relname FROM pg_catalog.pg_class")
+
+    assert message =~ "pg_catalog_unavailable"
+  end
+
+  test "each check is a catalog_refresh event: rebuilt, then unchanged (T-720)", %{
+    socket: socket
+  } do
+    parent = self()
+    handler = "pg-catalog-refresh-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:smolquery, :pg, :catalog_refresh],
+      fn _event, _measurements, metadata, _config ->
+        send(parent, {:refresh, metadata.result})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    query = fn -> PgClient.query(socket, "SELECT count(*) FROM pg_catalog.pg_class") end
+
+    query.()
+    assert_receive {:refresh, :rebuilt}
+    Process.sleep(60)
+    query.()
+    assert_receive {:refresh, :rebuilt}
+    Process.sleep(60)
+    query.()
+    assert_receive {:refresh, :unchanged}
   end
 end
