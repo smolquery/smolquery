@@ -7,8 +7,11 @@ defmodule Smolquery.Catalog.DuckLake.Format do
   `version`, and an extension refuses at `ATTACH` a catalog newer than its
   own. Two paths never attach: `Smolquery.Catalog.DuckLake.Swap` writes
   DuckLake's rows itself, as DuckLake 1.0 commits them, and
-  `Smolquery.Catalog.DuckLake.Reader` reads them over Postgrex. An engine
-  attached before a migration keeps the format it attached with. A migrated
+  `Smolquery.Catalog.DuckLake.Reader` reads them over Postgrex. DuckLake 1.5
+  let an engine attached before a migration go on at the format it attached
+  with; 2.0 re-reads the version row on every metadata transaction and
+  refuses ("migrated by another connection") while it differs, which
+  `mismatch/1` reads as the same error as the guard's. A migrated
   catalog would take the swap's rows without complaint and read them by
   another format's rules, so the swap checks the format inside its own
   transaction, and the reader checks it when its pool starts.
@@ -39,6 +42,7 @@ defmodule Smolquery.Catalog.DuckLake.Format do
 
   @version "1.0"
   @marker "smolquery catalog format"
+  @migrated ~r/migrated by another connection from version \S+ to ([^\s,]+)/
 
   @doc """
   The DuckLake catalog format this code is written for.
@@ -94,7 +98,9 @@ defmodule Smolquery.Catalog.DuckLake.Format do
   """
   @spec mismatch(term()) :: {:ok, {:catalog_format, String.t(), String.t()}} | :error
   def mismatch(%{__exception__: true} = error) do
-    case Regex.run(~r/#{@marker} \[([^\]]*)\]/, Exception.message(error)) do
+    message = Exception.message(error)
+
+    case Regex.run(~r/#{@marker} \[([^\]]*)\]/, message) || Regex.run(@migrated, message) do
       [_match, found] -> {:ok, {:catalog_format, found, @version}}
       nil -> :error
     end

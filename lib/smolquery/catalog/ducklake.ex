@@ -175,8 +175,15 @@ defmodule Smolquery.Catalog.DuckLake do
   that the catalog is at the format those rows are written for
   (`Smolquery.Catalog.DuckLake.Format`), and a swap against any other
   refuses with `{:error, {:catalog_format, found, expected}}`, writing
-  nothing (T-638). On Postgres metadata the move runs in one
-  `postgres_execute` batch that also locks the version row. The swap knows
+  nothing (T-638). DuckLake 2.0 checks the version row too, on every
+  metadata transaction of an attached engine, and refuses with its own
+  "migrated by another connection" error until the row is back at the
+  version it attached with. A commit answers that refusal as the same
+  `{:catalog_format, found, expected}`. On Postgres metadata the move runs in one
+  `postgres_execute` call that also locks the version row: one PL/pgSQL `DO`
+  block, its guard `SELECT`s written as `PERFORM`, since the postgres
+  extension of DuckDB 2.0 prepares what it sends, and Postgres refuses to
+  prepare several statements at once. The swap knows
   the metadata is Postgres by the lake's own `path` in `duckdb_databases()`,
   not by DuckLake's `__ducklake_metadata_` database there, which DuckDB 2.0
   no longer lists: read that way, every swap took the batch for DuckDB's and
@@ -944,6 +951,14 @@ defmodule Smolquery.Catalog.DuckLake do
   scatter fell back to the coordinator. The subquery reads the 153 files in
   9-10 ms and the 1,730 in 79-340 ms (T-696).
 
+  A file's column ids are the columns it holds. DuckLake 1.5 wrote a stats
+  row only for those; 2.0 writes one for every column of the table, and
+  marks a column the file lacks with `column_size_bytes` 0, where a column
+  the file holds has bytes even when every value is null. So a zero-byte row
+  is left out, or a file sealed before an `ALTER` would look as if it held a
+  column it does not, and `Smolquery.QueryService.Views` would read that
+  materialized column from the file, as nulls, instead of computing it.
+
   The two paths differ only in the order: Postgres sorts the paths
   `COLLATE "C"` to match DuckDB's byte order.
   """
@@ -958,7 +973,8 @@ defmodule Smolquery.Catalog.DuckLake do
     "SELECT #{@live_file_columns}, df.begin_snapshot, " <>
       "(SELECT array_agg(fcs.column_id ORDER BY fcs.column_id) " <>
       "FROM #{meta(config, "ducklake_file_column_stats")} fcs " <>
-      "WHERE fcs.table_id = df.table_id AND fcs.data_file_id = df.data_file_id) " <>
+      "WHERE fcs.table_id = df.table_id AND fcs.data_file_id = df.data_file_id " <>
+      "AND fcs.column_size_bytes IS DISTINCT FROM 0) " <>
       "FROM #{live_files_joins(config)} WHERE #{@live_files} ORDER BY #{order}"
   end
 
@@ -1352,16 +1368,14 @@ defmodule Smolquery.Catalog.DuckLake do
     if postgres_metadata?(config.metadata || metadata_path(config)) do
       prefix = ~s("public")
 
-      batch =
-        Enum.join(
-          Format.guard_statements(prefix, lock: true) ++ Swap.statements(plan, prefix),
-          ";\n"
-        )
+      block =
+        (Format.guard_statements(prefix, lock: true) ++ Swap.statements(plan, prefix))
+        |> Enum.map_join(";\n", &String.replace_prefix(&1, "SELECT ", "PERFORM "))
 
       [
         {:move,
          "CALL postgres_execute(#{Identifier.sql_string("__ducklake_metadata_" <> config.catalog)}, " <>
-           "#{Identifier.sql_string(batch)})"}
+           "#{Identifier.sql_string("DO $swap$ BEGIN\n" <> block <> ";\nEND $swap$")})"}
       ]
     else
       prefix = metadata_schema(config.catalog)
@@ -2092,7 +2106,11 @@ defmodule Smolquery.Catalog.DuckLake do
   def retryable?(_error), do: false
 
   defp classify(error) do
-    if retryable?(error), do: :commit_conflict, else: error
+    case {retryable?(error), Format.mismatch(error)} do
+      {true, _mismatch} -> :commit_conflict
+      {false, {:ok, mismatch}} -> mismatch
+      {false, :error} -> error
+    end
   end
 
   defp snapshot_argument(:current), do: []
