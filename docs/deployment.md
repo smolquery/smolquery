@@ -220,6 +220,16 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### Unreleased: the node runs as `smolquery` (uid 10001), not root (T-722)
+
+**TL;DR.** The image runs the release as user and group `smolquery`, 10001. A locked query engine may write any path it is allowed to read, the node's CA bundle among them, and as this user it cannot write a root-owned file.
+
+- **Kubernetes.** Give the pod `fsGroup: 10001` (with `fsGroupChangePolicy: OnRootMismatch`) and the `smolquery` container `runAsNonRoot: true`, `runAsUser: 10001`, `runAsGroup: 10001`, or a volume first written as root stays root's and the node cannot write `/data`. `deploy/components/non-root` sets all of it; `deploy/base` and the kind overlays include it. **Roll the manifests out before or with the image**, never the image alone.
+- **kind.** Its local volumes are host directories, which take no `fsGroup`, so the kind overlays add an init container that gives an existing `/data` to 10001.
+- **Docker.** A volume first written by an older image is root's. Give it to the user once, before starting the new image: `docker run --rm --user 0 -v smolquery-data:/data --entrypoint chown ghcr.io/smolquery/smolquery:<version> -R 10001:10001 /data`. A new volume is the user's already.
+- **What stays read-only.** Everything under `/app` but `/app/tmp` (`RELEASE_TMP`, and the crash dump, `ERL_CRASH_DUMP`) and `/app/.tmp` (DuckDB's default spill root), the DuckDB extensions included: the image installs every extension it loads at build time, `sqlite` among them.
+- **A warning to watch for.** A node that can write the CA bundle it found (run as root, or `SSL_CERT_FILE` naming a file of its own) logs `the CA bundle … is writable by this node` once.
+
 ### Unreleased: the engine is DuckDB 2.0.0, on the DuckLake 1.0 catalog (T-395)
 
 **TL;DR.** The engine moves from DuckDB 1.5.3 to 2.0.0. The catalog stays at DuckLake format 1.0: every attach pins `DUCKLAKE_VERSION '1.0'`, so a 2.0 node neither creates nor migrates a catalog to 2.0's own format (1.1-dev1). Upgrading the catalog format is a later, separate step.

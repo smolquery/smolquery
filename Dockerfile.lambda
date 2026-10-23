@@ -6,8 +6,10 @@
 ARG BASE=ghcr.io/smolquery/smolquery:latest
 FROM ${BASE}
 
+USER root
 COPY rel/lambda/bootstrap /app/bootstrap
 RUN chmod 0755 /app/bootstrap
+USER 10001:10001
 
 ENV HOME=/tmp \
     RELEASE_TMP=/tmp \

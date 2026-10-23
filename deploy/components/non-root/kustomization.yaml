@@ -1,0 +1,34 @@
+# T-722: smolquery runs as the image's smolquery user (10001), not root. A
+# locked DuckDB engine may write any path in its allowed_paths, the node's CA
+# bundle among them (T-718); as this user it cannot write a root-owned file.
+#
+# fsGroup keeps /data writable on a volume that honours it (an EBS or other
+# block PVC, an emptyDir). OnRootMismatch chowns a volume once, not on every
+# mount, which matters for a large buffer volume. The container's own
+# securityContext is set per container, so the postgres init containers keep
+# their image's user.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+  - target:
+      kind: StatefulSet
+      name: smolquery-.*
+    patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: smolquery
+      spec:
+        template:
+          spec:
+            securityContext:
+              fsGroup: 10001
+              fsGroupChangePolicy: OnRootMismatch
+            containers:
+              - name: smolquery
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 10001
+                  runAsGroup: 10001
+                  allowPrivilegeEscalation: false

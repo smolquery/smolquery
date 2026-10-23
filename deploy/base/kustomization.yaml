@@ -6,3 +6,6 @@ resources:
   - api.yaml
   - buffer.yaml
   - storage.yaml
+
+components:
+  - ../components/non-root
