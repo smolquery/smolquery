@@ -24,6 +24,13 @@ defmodule Smolquery.Engine.ExtensionLoader do
 
   A VM without the application started, such as a script, has no loader
   and loads inline.
+
+  The answers to an `INSTALL` and a `LOAD` refer to the connection that ran
+  them, and through it to the whole DuckDB instance. Left as garbage on
+  this long-lived, quiet process's heap, they kept the last engine it loaded
+  alive, threads and all, until it next collected garbage (T-724). So each
+  load runs in a process of its own that the loader waits on, and the answers
+  go with that process's heap when it exits.
   """
 
   use GenServer
@@ -62,7 +69,16 @@ defmodule Smolquery.Engine.ExtensionLoader do
 
   @impl true
   def handle_call({:load, adbc, extensions}, _from, state),
-    do: {:reply, load_each(adbc, extensions), state}
+    do: {:reply, apart(fn -> load_each(adbc, extensions) end), state}
+
+  defp apart(fun) do
+    {pid, monitor} = spawn_monitor(fn -> exit({:loaded, fun.()}) end)
+
+    receive do
+      {:DOWN, ^monitor, :process, ^pid, {:loaded, result}} -> result
+      {:DOWN, ^monitor, :process, ^pid, reason} -> {:error, {:loader_crashed, reason}}
+    end
+  end
 
   defp load_each(adbc, extensions) do
     Enum.reduce_while(extensions, :ok, fn extension, :ok ->

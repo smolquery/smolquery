@@ -55,6 +55,7 @@ defmodule Smolquery.QueryService.JobEngine do
   """
 
   alias Smolquery.DuckDB
+  alias Smolquery.Engine.Canceller
   alias Smolquery.Engine.Connection
   alias Smolquery.EngineSecrets
   alias Smolquery.Identifier
@@ -69,7 +70,7 @@ defmodule Smolquery.QueryService.JobEngine do
   @type t :: %{
           database: pid(),
           connection: pid(),
-          cancel: Adbc.Connection.cancel_handle()
+          canceller: pid()
         }
   @type source :: :warm | :cold
 
@@ -148,24 +149,34 @@ defmodule Smolquery.QueryService.JobEngine do
   (`Smolquery.Engine.Connection.start_link/1` options, minus `:database`).
 
   A connection that fails to bootstrap takes the database with it. The
-  engine carries the connection's cancel handle, taken while it is idle,
-  for `stop/1`.
+  engine carries the connection's `Smolquery.Engine.Canceller`, not its
+  cancel handle: a handle in the engine map kept the whole DuckDB instance
+  alive in every heap the map was copied to (T-724).
   """
   @spec start(keyword()) :: {:ok, t()} | {:error, term()}
   def start(opts) do
     with {:ok, database} <- DuckDB.start_link() do
       case Connection.start_link([{:database, database} | opts]) do
         {:ok, connection} ->
-          cancel =
-            connection |> Connection.adbc_connection() |> Adbc.Connection.cancel_handle()
-
-          {:ok, %{database: database, connection: connection, cancel: cancel}}
+          with_canceller(database, connection)
 
         {:error, reason} ->
           Process.exit(database, :kill)
 
           {:error, reason}
       end
+    end
+  end
+
+  defp with_canceller(database, connection) do
+    case Canceller.start(connection) do
+      {:ok, canceller} ->
+        {:ok, %{database: database, connection: connection, canceller: canceller}}
+
+      {:error, reason} ->
+        kill(database, connection)
+
+        {:error, reason}
     end
   end
 
@@ -185,7 +196,7 @@ defmodule Smolquery.QueryService.JobEngine do
   Unlinks the caller from both engine processes — the pool's half of the
   hand-over, and the first step of `stop/1`.
   """
-  @spec unlink(t()) :: :ok
+  @spec unlink(%{:database => pid(), :connection => pid(), optional(atom()) => term()}) :: :ok
   def unlink(%{database: database, connection: connection}) do
     Process.unlink(connection)
     Process.unlink(database)
@@ -199,15 +210,20 @@ defmodule Smolquery.QueryService.JobEngine do
 
   Killing alone does not stop DuckDB. A query runs inside a NIF, which a
   kill does not interrupt, so it would run on until it finished, holding a
-  scheduler and DuckDB's threads. The cancel makes it fail now, through the
-  handle `start/1` took, without waiting on the busy connection process.
+  scheduler and DuckDB's threads. The canceller makes it fail now, without
+  waiting on the busy connection process, and its exit drops the last
+  reference to the instance.
   """
   @spec stop(t() | nil) :: :ok
   def stop(nil), do: :ok
 
-  def stop(%{database: database, connection: connection, cancel: cancel} = engine) do
-    Adbc.Connection.cancel(cancel)
-    unlink(engine)
+  def stop(%{database: database, connection: connection, canceller: canceller}) do
+    Canceller.cancel(canceller)
+    kill(database, connection)
+  end
+
+  defp kill(database, connection) do
+    unlink(%{database: database, connection: connection})
     Process.exit(connection, :kill)
     Process.exit(database, :kill)
 

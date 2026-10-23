@@ -4,6 +4,7 @@ defmodule Smolquery.Engine.ExtensionLoaderTest do
   alias Smolquery.DuckDB
   alias Smolquery.Engine.Connection
   alias Smolquery.Engine.ExtensionLoader
+  alias Smolquery.Test.Eventually
 
   @database __MODULE__.Database
 
@@ -28,6 +29,34 @@ defmodule Smolquery.Engine.ExtensionLoaderTest do
 
     test "loads inline when no loader is running, as a script does", %{adbc: adbc} do
       assert ExtensionLoader.load(__MODULE__.Absent, adbc, [:sqlite]) == :ok
+    end
+
+    test "keeps nothing of an engine it loaded, so the engine's threads go with it (T-724)" do
+      loader = start_supervised!({ExtensionLoader, name: __MODULE__.Keeping})
+      threads = fn -> length(File.ls!("/proc/self/task")) end
+      before = threads.()
+
+      {:ok, database} = DuckDB.start_link(process_options: [name: __MODULE__.Kept])
+      {:ok, adbc} = Adbc.Connection.start_link(database: database)
+
+      warm =
+        Task.async(fn ->
+          {:ok, _set} = Adbc.Connection.query(adbc, "SET threads = 64")
+          {:ok, _ran} = Adbc.Connection.query(adbc, "SELECT count(*) FROM range(1000000)")
+          :ok
+        end)
+
+      assert Task.await(warm) == :ok
+
+      assert ExtensionLoader.load(loader, adbc, [:sqlite]) == :ok
+      assert threads.() >= before + 64
+
+      Process.unlink(adbc)
+      Process.unlink(database)
+      Process.exit(adbc, :kill)
+      Process.exit(database, :kill)
+
+      assert Eventually.until(fn -> threads.() < before + 64 end)
     end
 
     test "nothing to load returns at once", %{adbc: adbc} do

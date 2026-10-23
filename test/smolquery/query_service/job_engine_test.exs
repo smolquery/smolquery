@@ -19,6 +19,7 @@ defmodule Smolquery.QueryService.JobEngineTest do
   alias Smolquery.Engine.Connection
   alias Smolquery.QueryService.JobEngine
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.Test.Eventually
   alias Smolquery.Test.FixedCatalog
 
   setup do
@@ -161,7 +162,20 @@ defmodule Smolquery.QueryService.JobEngineTest do
 
     refute Process.alive?(engine.connection)
     refute Process.alive?(engine.database)
+    refute Process.alive?(engine.canceller)
     assert JobEngine.stop(nil) == :ok
+  end
+
+  test "stop/1 frees the DuckDB instance and its threads while the caller still holds the engine (T-724)" do
+    threads = fn -> length(File.ls!("/proc/self/task")) end
+    before = threads.()
+
+    {:ok, engine} = JobEngine.start(settings: [threads: 64])
+    assert threads.() >= before + 64
+    refute Enum.any?(Map.values(engine), &is_reference/1)
+
+    assert JobEngine.stop(engine) == :ok
+    assert Eventually.until(fn -> threads.() < before + 64 end)
   end
 
   test "stop/1 cancels a running query rather than leaving it to run out on a dirty scheduler",
