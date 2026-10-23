@@ -82,6 +82,17 @@ defmodule Smolquery.Catalog.DuckLake.FormatTest do
     assert Format.mismatch(:timeout) == :error
   end
 
+  test "mismatch/1 reads the version DuckLake 2.0 refuses an attached engine for" do
+    refused =
+      %Adbc.Error{
+        message:
+          "Invalid Input Error: The catalog was migrated by another connection from version " <>
+            "1.0 to 1.1-dev1, reattach to pick up the new version\n\nLINE 1: SELECT data_file ..."
+      }
+
+    assert Format.mismatch(refused) == {:ok, {:catalog_format, "1.1-dev1", "1.0"}}
+  end
+
   test "mismatch/1 reads the version, not the guard's own text an error quotes" do
     [check] = Format.guard_statements("m")
     quoted = RuntimeError.exception("Failed to execute query \"#{check}\": no connection")

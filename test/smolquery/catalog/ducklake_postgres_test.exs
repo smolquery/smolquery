@@ -172,7 +172,7 @@ defmodule Smolquery.Catalog.DuckLakePostgresTest do
     {:ok, _deleting} =
       Adbc.Connection.query(
         other,
-        ~s|DELETE FROM #{@catalog_name}."analytics"."events" WHERE filename = '#{b.path}'|
+        ~s|DELETE FROM #{@catalog_name}."analytics"."events" WHERE filename = '#{sealed.path}'|
       )
 
     again = write_segment(segments_dir, 2)
