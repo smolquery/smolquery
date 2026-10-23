@@ -7,10 +7,11 @@ defmodule Smolquery.Catalog.DuckLake.SwapTest do
   @twin [{1, "ts", nil, "TIMESTAMP"}, {2, "v", nil, "BIGINT"}, {3, "s", nil, "VARCHAR"}]
 
   describe "matches?/2 and column_ids/2" do
-    test "a twin matches its table by path and type, whatever the ids" do
-      assert Swap.matches?(@twin, @table)
-      refute Swap.matches?(@twin, [{5, "extra", nil, "BIGINT"} | @table])
-      refute Swap.matches?([{1, "ts", nil, "TIMESTAMP_NS"} | tl(@twin)], @table)
+    test "a twin matches its table by id, path and type" do
+      assert Swap.matches?(@table, @table)
+      refute Swap.matches?(@twin, @table)
+      refute Swap.matches?(@table, [{5, "extra", nil, "BIGINT"} | @table])
+      refute Swap.matches?([{1, "ts", nil, "TIMESTAMP_NS"} | tl(@table)], @table)
     end
 
     test "maps the twin's ids to the table's by path, nested columns included" do
@@ -24,6 +25,33 @@ defmodule Smolquery.Catalog.DuckLake.SwapTest do
     test "names a twin column the table has no column for" do
       assert Swap.column_ids([{9, "gone", nil, "BIGINT"} | @twin], @table) ==
                {:error, {:unmapped_columns, [["gone"]]}}
+    end
+  end
+
+  describe "twin_statements/3" do
+    test "selects the columns in id order with a placeholder for each unused id, then drops them" do
+      table = [
+        {9, "b", nil, "varchar"},
+        {2, "m", nil, "map"},
+        {3, "key", 2, "varchar"},
+        {4, "value", 2, "int64"},
+        {5, "s", nil, "struct"},
+        {6, "y", 5, "struct"},
+        {7, "p", 6, "int64"}
+      ]
+
+      assert Swap.twin_statements("lake.t", "stage.t2", table) == [
+               "CREATE TABLE stage.t2 AS SELECT NULL::INTEGER AS \"__smolquery_placeholder_1\", " <>
+                 ~s("m", "s", NULL::INTEGER AS "__smolquery_placeholder_8", "b" FROM lake.t LIMIT 0),
+               ~s(ALTER TABLE stage.t2 DROP COLUMN "__smolquery_placeholder_1"),
+               ~s(ALTER TABLE stage.t2 DROP COLUMN "__smolquery_placeholder_8")
+             ]
+    end
+
+    test "needs no placeholder for a table that never dropped a column" do
+      assert Swap.twin_statements("lake.t", "stage.t2", @twin) == [
+               ~s(CREATE TABLE stage.t2 AS SELECT "ts", "v", "s" FROM lake.t LIMIT 0)
+             ]
     end
   end
 

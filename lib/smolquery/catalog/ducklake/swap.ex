@@ -24,8 +24,21 @@ defmodule Smolquery.Catalog.DuckLake.Swap do
   footer and write the file's column statistics and name mapping by its own
   rules: nothing here formats a statistic, so nothing here can prune a query
   wrongly. The move then rewrites those rows onto the real table, with the
-  twin's column ids remapped by column path, since a table that dropped and
-  re-added a column numbers it differently from a fresh twin.
+  twin's column ids remapped by column path.
+
+  ## The twin is numbered as its table
+
+  DuckLake numbers a table's columns from one counter, a column before its
+  children, and never reuses a number, so a table that dropped and re-added
+  a column has gaps a fresh twin would not. The twin must have them too. A
+  merged file carries the table's column ids as Parquet field ids (PL-62),
+  and from DuckLake 2.0 `ducklake_add_data_files` refuses a file whose
+  field ids are not live columns of the table it registers into.
+  `twin_statements/3` therefore creates the twin with a placeholder column
+  in each gap and drops the placeholders again, and `matches?/2` compares
+  ids as well as paths, so a twin numbered any other way is recreated. With
+  matching ids the remap is the identity; it stays as the check that the
+  twin and the table still agree.
 
   ## One metadata transaction, guarded by the snapshot key
 
@@ -63,6 +76,7 @@ defmodule Smolquery.Catalog.DuckLake.Swap do
   alias Smolquery.Identifier
 
   @stage_schema "__smolquery_stage"
+  @placeholder "__smolquery_placeholder_"
 
   @typedoc "A `ducklake_column` row: `{column_id, column_name, parent_column, column_type}`."
   @type column :: {integer(), String.t(), integer() | nil, String.t()}
@@ -103,19 +117,69 @@ defmodule Smolquery.Catalog.DuckLake.Swap do
   def stage_table(table_id) when is_integer(table_id), do: "t#{table_id}"
 
   @doc """
-  Whether a twin's columns still match its table's, by path and type. A twin
-  that drifted, because the table gained, lost or retyped a column, is
-  recreated before anything is staged into it.
+  The statements that create `twin` as an empty copy of `table`, its live
+  column ids those of `table_columns`.
+
+  The table's top-level columns are selected in id order, with a
+  placeholder for each id the table no longer uses, and each placeholder is
+  dropped again. A placeholder takes one id, and a column takes one for
+  itself and one for each column under it.
+  """
+  @spec twin_statements(String.t(), String.t(), [column()]) :: [String.t()]
+  def twin_statements(table, twin, table_columns) do
+    layout = layout(table_columns)
+
+    select =
+      Enum.map_join(layout, ", ", fn
+        {:column, name} -> Identifier.quote_name!(name)
+        {:placeholder, name} -> "NULL::INTEGER AS #{Identifier.quote_name!(name)}"
+      end)
+
+    drops =
+      for {:placeholder, name} <- layout,
+          do: "ALTER TABLE #{twin} DROP COLUMN #{Identifier.quote_name!(name)}"
+
+    ["CREATE TABLE #{twin} AS SELECT #{select} FROM #{table} LIMIT 0" | drops]
+  end
+
+  defp layout(columns) do
+    parents = Map.new(columns, fn {id, _name, parent, _type} -> {id, parent} end)
+    widths = Enum.frequencies_by(columns, fn {id, _name, _parent, _type} -> root(parents, id) end)
+
+    {layout, _next} =
+      columns
+      |> Enum.filter(&match?({_id, _name, nil, _type}, &1))
+      |> Enum.sort()
+      |> Enum.map_reduce(1, fn {id, name, nil, _type}, next ->
+        placeholders = Enum.map(next..(id - 1)//1, &{:placeholder, "#{@placeholder}#{&1}"})
+        {[placeholders, {:column, name}], id + Map.fetch!(widths, id)}
+      end)
+
+    List.flatten(layout)
+  end
+
+  defp root(parents, id) do
+    case Map.fetch!(parents, id) do
+      nil -> id
+      parent -> root(parents, parent)
+    end
+  end
+
+  @doc """
+  Whether a twin's columns still match its table's, by id, path and type. A
+  twin that drifted, because the table gained, lost or retyped a column, or
+  that is numbered otherwise than the table, is recreated before anything is
+  staged into it.
   """
   @spec matches?([column()], [column()]) :: boolean()
   def matches?(stage_columns, table_columns),
-    do: typed_paths(stage_columns) == typed_paths(table_columns)
+    do: numbered_paths(stage_columns) == numbered_paths(table_columns)
 
-  defp typed_paths(columns) do
+  defp numbered_paths(columns) do
     paths = paths(columns)
 
     columns
-    |> Enum.map(fn {id, _name, _parent, type} -> {Map.fetch!(paths, id), type} end)
+    |> Enum.map(fn {id, _name, _parent, type} -> {id, Map.fetch!(paths, id), type} end)
     |> Enum.sort()
   end
 
