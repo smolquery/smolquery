@@ -11,11 +11,14 @@ defmodule Smolquery.QueryService.ShardDescribe do
   took 30 s to describe where it took 1.5 s.
 
   So the files are cut into as many chunks as the engine has threads, at
-  most 4, and every chunk is read by its own `parquet_schema` at once: the
-  first on the engine's own connection, each other on a helper connection to
-  the engine's database. Each read waits inside a NIF on one of the node's 10
-  dirty I/O schedulers, which every `adbc` call shares, so 4 keeps two shards
-  describing at once inside them.
+  most `max_chunks/0`, and every chunk is read by its own `parquet_schema` at
+  once: the first on the engine's own connection, each other on a helper
+  connection to the engine's database. Each read waits inside a NIF on one of
+  the node's dirty I/O schedulers, which every `adbc` call shares: the BEAM
+  starts 10, and a release starts 32 (`rel/env.sh.eex`, T-723). So the cap
+  is a fifth of them, at least 4 and at most 8: 6 at 32, so the 4 shards a
+  node runs at once by default (`local_workers`) hold 24 and leave the rest
+  for every other read.
 
   A helper is a `Smolquery.Engine.Connection` on the engine's database. It
   loads no extension and applies no setting, because both belong to the
@@ -45,8 +48,6 @@ defmodule Smolquery.QueryService.ShardDescribe do
   alias Smolquery.Identifier
   alias Smolquery.Segments.FieldIds
 
-  @max_chunks 4
-
   @type engine :: %{connection: pid(), database: pid(), bootstrap: keyword()}
 
   @doc """
@@ -61,17 +62,18 @@ defmodule Smolquery.QueryService.ShardDescribe do
   def files(engine, urls, statements) do
     with {:ok, threads, temp_directory} <- settings(engine.connection) do
       options = helper_options(engine, temp_directory, statements)
+      cap = max_chunks(:erlang.system_info(:dirty_io_schedulers))
       {:ok, supervisor} = Task.Supervisor.start_link()
 
       try do
         supervisor
         |> Task.Supervisor.async_stream_nolink(
-          urls |> chunks(threads) |> Enum.with_index(),
+          urls |> chunks(threads, cap) |> Enum.with_index(),
           fn
             {chunk, 0} -> describe(engine.connection, chunk)
             {chunk, _helper} -> on_helper(options, chunk)
           end,
-          max_concurrency: @max_chunks,
+          max_concurrency: cap,
           ordered: false,
           timeout: :infinity
         )
@@ -83,14 +85,21 @@ defmodule Smolquery.QueryService.ShardDescribe do
   end
 
   @doc """
-  `urls` cut into at most `min(threads, #{@max_chunks})` chunks of near-equal
-  size, in order. No files is no chunks.
+  How many chunks a describe reads at once at most on a node with
+  `dirty_io_schedulers`: a fifth of them, at least 4 and at most 8.
   """
-  @spec chunks([String.t()], pos_integer()) :: [[String.t()]]
-  def chunks([], _threads), do: []
+  @spec max_chunks(pos_integer()) :: pos_integer()
+  def max_chunks(dirty_io_schedulers), do: dirty_io_schedulers |> div(5) |> max(4) |> min(8)
 
-  def chunks(urls, threads) do
-    count = threads |> min(@max_chunks) |> max(1)
+  @doc """
+  `urls` cut into at most `min(threads, cap)` chunks of near-equal size, in
+  order. No files is no chunks.
+  """
+  @spec chunks([String.t()], pos_integer(), pos_integer()) :: [[String.t()]]
+  def chunks([], _threads, _cap), do: []
+
+  def chunks(urls, threads, cap) do
+    count = threads |> min(cap) |> max(1)
     Enum.chunk_every(urls, ceil(length(urls) / count))
   end
 

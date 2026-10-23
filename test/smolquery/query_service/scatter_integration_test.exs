@@ -40,6 +40,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   alias Smolquery.Catalog.DuckLake
   alias Smolquery.QueryService
   alias Smolquery.QueryService.Client
+  alias Smolquery.QueryService.DescriptionCache
   alias Smolquery.QueryService.PartialWorker
   alias Smolquery.QueryService.Statistics
   alias Smolquery.Schema
@@ -539,6 +540,32 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
              PartialWorker.run(distributed, Map.put(request, :file_cache_mode, :auto))
 
     assert {:ok, %{rows: 1, file_cache: :bypassed}} = PartialWorker.run(distributed, request)
+  end
+
+  test "a shard keeps what it described, so the next shard on the node reads no footer (T-723)",
+       %{distributed: distributed, catalog: catalog} do
+    {:ok, files} = Catalog.segment_files(catalog, @table, :current)
+    {:ok, schema} = Catalog.table_schema(catalog, @table)
+    urls = Enum.map(files, & &1.path)
+
+    request = %{
+      table_ref: @table,
+      schema: schema,
+      files:
+        Enum.map(files, &%{"url" => &1.path, "snapshot" => &1.snapshot, "bytes" => &1.bytes}),
+      partial_sql: "SELECT sum(id) AS s FROM analytics.events",
+      allowed_paths: [],
+      file_cache: :bypassed
+    }
+
+    cache = QueryService.Runtime.description_cache(distributed)
+    assert {_held, ^urls} = DescriptionCache.fetch(cache, request.files)
+
+    assert {:ok, %{rows: 1, parquet: first}} = PartialWorker.run(distributed, request)
+    assert {held, []} = DescriptionCache.fetch(cache, request.files)
+    assert map_size(held) == length(urls)
+
+    assert {:ok, %{rows: 1, parquet: ^first}} = PartialWorker.run(distributed, request)
   end
 
   test "a scattered query traces gather, merge and one shard per worker (T-691)",

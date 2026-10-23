@@ -554,6 +554,13 @@ defmodule Smolquery.QueryService.Runtime do
   @spec file_cache_index(atom()) :: atom()
   def file_cache_index(name), do: Module.concat(name, "FileCacheIndex")
 
+  @doc """
+  The ETS table `Smolquery.QueryService.DescriptionCache` keeps what sealed
+  files say about their columns in, for instance `name` (T-723).
+  """
+  @spec description_cache(atom()) :: atom()
+  def description_cache(name), do: Module.concat(name, "DescriptionCache")
+
   defp bootstrap(nil), do: []
 
   defp bootstrap(catalog_opts) do
