@@ -70,7 +70,8 @@ defmodule Smolquery.QueryService.JobEngine do
   @type t :: %{
           database: pid(),
           connection: pid(),
-          canceller: pid()
+          canceller: pid(),
+          bootstrap: keyword()
         }
   @type source :: :warm | :cold
 
@@ -152,13 +153,20 @@ defmodule Smolquery.QueryService.JobEngine do
   engine carries the connection's `Smolquery.Engine.Canceller`, not its
   cancel handle: a handle in the engine map kept the whole DuckDB instance
   alive in every heap the map was copied to (T-724).
+
+  It also carries `bootstrap`: what another connection to the same database
+  needs to read as this one does (T-719). That is the extensions it loaded,
+  and of its statements only the `SET`s: a `SET` of an extension's option
+  holds for the connection that ran it, while extensions, settings such as
+  `memory_limit`, an `ATTACH`, a secret and the file cache's exclusions belong
+  to the database or the extension and are in place already.
   """
   @spec start(keyword()) :: {:ok, t()} | {:error, term()}
   def start(opts) do
     with {:ok, database} <- DuckDB.start_link() do
       case Connection.start_link([{:database, database} | opts]) do
         {:ok, connection} ->
-          with_canceller(database, connection)
+          with_canceller(database, connection, bootstrap(opts))
 
         {:error, reason} ->
           Process.exit(database, :kill)
@@ -168,10 +176,25 @@ defmodule Smolquery.QueryService.JobEngine do
     end
   end
 
-  defp with_canceller(database, connection) do
+  defp bootstrap(opts) do
+    [
+      extensions: Keyword.get(opts, :extensions, []),
+      statements: Enum.filter(Keyword.get(opts, :statements, []), &set?/1)
+    ]
+  end
+
+  defp set?(statement), do: statement =~ ~r/\A\s*SET\s/i
+
+  defp with_canceller(database, connection, bootstrap) do
     case Canceller.start(connection) do
       {:ok, canceller} ->
-        {:ok, %{database: database, connection: connection, canceller: canceller}}
+        {:ok,
+         %{
+           database: database,
+           connection: connection,
+           canceller: canceller,
+           bootstrap: bootstrap
+         }}
 
       {:error, reason} ->
         kill(database, connection)

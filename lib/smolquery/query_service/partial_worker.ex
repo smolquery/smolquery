@@ -138,8 +138,8 @@ defmodule Smolquery.QueryService.PartialWorker do
   alias Smolquery.QueryService.Lockdown
   alias Smolquery.QueryService.ReadBytes
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.QueryService.ShardDescribe
   alias Smolquery.QueryService.Views
-  alias Smolquery.Segments.FieldIds
   alias Smolquery.Segments.Store
   alias Smolquery.Telemetry
 
@@ -384,7 +384,7 @@ defmodule Smolquery.QueryService.PartialWorker do
            :ok <- apply_statements(engine.connection, plan.functions),
            logging = read_logging(engine.connection, request),
            {describe_us, {:ok, files}} <-
-             Telemetry.timed(fn -> described(engine.connection, request.files) end),
+             Telemetry.timed(fn -> described(engine, request.files, plan.settings) end),
            :ok <-
              apply_statements(
                engine.connection,
@@ -464,7 +464,7 @@ defmodule Smolquery.QueryService.PartialWorker do
         Views.recomputed(schema, files)
       )
 
-  defp described(connection, files) do
+  defp described(engine, files, settings) do
     {unknown, known} =
       Enum.split_with(files, &(Map.get(&1, "field_ids") == nil and Map.has_key?(&1, "snapshot")))
 
@@ -474,18 +474,10 @@ defmodule Smolquery.QueryService.PartialWorker do
 
       sealed ->
         with(
-          {:ok, described} <- read_ids(connection, sealed),
+          {:ok, described} <-
+            ShardDescribe.files(engine, Enum.map(sealed, & &1["url"]), settings),
           do: attach_ids(known, sealed, described)
         )
-    end
-  end
-
-  defp read_ids(connection, sealed) do
-    urls = Enum.map(sealed, & &1["url"])
-
-    with {:ok, result} <-
-           Connection.query(connection, FieldIds.sql(length(urls)), urls, :infinity) do
-      {:ok, FieldIds.by_file(result.rows)}
     end
   end
 
