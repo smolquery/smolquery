@@ -2,6 +2,7 @@ defmodule Smolquery.Engine.ConnectionTest do
   use ExUnit.Case, async: false
 
   alias Smolquery.DuckDB
+  alias Smolquery.Engine.CaBundle
   alias Smolquery.Engine.Connection
   alias Smolquery.Engine.Result
 
@@ -329,6 +330,23 @@ defmodule Smolquery.Engine.ConnectionTest do
 
       assert {:error, %Adbc.Error{}} = Connection.shape(conn, "SELECT 1;")
       assert {:ok, _still_alive} = Connection.query(conn, "SELECT 1")
+    end
+  end
+
+  describe "the CA bundle (T-718)" do
+    test "a connection that loads httpfs, at start or later, points ca_cert_file at the node's bundle" do
+      bundle = CaBundle.path()
+      assert is_binary(bundle)
+
+      {:ok, at_start} = Connection.start_link(database: @database, extensions: [:httpfs])
+      assert {:ok, setting} = Connection.query(at_start, "SELECT current_setting('ca_cert_file')")
+      assert Result.one!(setting) == bundle
+
+      later = start_supervised!({DuckDB, process_options: [name: __MODULE__.Later]}, id: :later)
+      {:ok, conn} = Connection.start_link(database: later)
+      assert :ok = Connection.load_extensions(conn, [:httpfs])
+      assert {:ok, setting} = Connection.query(conn, "SELECT current_setting('ca_cert_file')")
+      assert Result.one!(setting) == bundle
     end
   end
 end

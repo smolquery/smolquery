@@ -18,18 +18,32 @@ defmodule Smolquery.QueryService.Lockdown do
   so the lake reads under a full lock and no option is exempted. DuckDB's
   own spill files are not subject to the lists; the engine spills with
   access closed wherever its `temp_directory` points.
+
+  ## The CA bundle stays readable
+
+  `httpfs` on DuckDB 2.0 reads its CA bundle through the engine's file
+  system when the engine opens its first HTTPS connection, and access closed
+  refuses that read. An engine that opened one before its lockdown never
+  notices: a shard's views read its files' footers first. An engine that
+  opens its first after the lockdown is refused every HTTPS read: the merge
+  of spilled partials, on the coordinator and on every merge shard (T-718).
+  So `allowed_paths` carries the node's `Smolquery.Engine.CaBundle`, the one
+  file every connection's `ca_cert_file` names. `allowed_paths` admits a
+  write as well as a read, which that moduledoc weighs.
   """
 
+  alias Smolquery.Engine.CaBundle
   alias Smolquery.Identifier
 
   @doc """
-  The lockdown statements for an engine allowed `directories` and `paths`.
+  The lockdown statements for an engine allowed `directories` and `paths`,
+  the node's CA bundle added to `paths`.
   """
   @spec statements([String.t()], [String.t()]) :: [String.t()]
   def statements(directories, paths) do
     [
       "SET allowed_directories = #{Identifier.sql_list(directories)}",
-      "SET allowed_paths = #{Identifier.sql_list(paths)}",
+      "SET allowed_paths = #{Identifier.sql_list(paths ++ List.wrap(CaBundle.path()))}",
       "SET enable_external_access = false",
       "SET lock_configuration = true"
     ]

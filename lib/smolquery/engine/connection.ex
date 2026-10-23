@@ -110,12 +110,17 @@ defmodule Smolquery.Engine.Connection do
   node, and the settings and statements that follow run outside it. What
   the loader does not see is an extension DuckDB autoloads at first use on
   an engine that did not list it, so an engine lists what it uses.
+
+  A connection that loads `httpfs`, either way, points `ca_cert_file` at the
+  node's `Smolquery.Engine.CaBundle`, so a locked engine reads that one file
+  to open HTTPS and the lockdown allows nothing else (T-718).
   """
 
   use GenServer
 
   require Logger
 
+  alias Smolquery.Engine.CaBundle
   alias Smolquery.Engine.ExtensionLoader
   alias Smolquery.Engine.IpcSchema
   alias Smolquery.Engine.Params
@@ -377,7 +382,7 @@ defmodule Smolquery.Engine.Connection do
 
     with {:ok, adbc} <- Adbc.Connection.start_link(database: database),
          :ok <- apply_settings(adbc, extension_directory()),
-         :ok <- ExtensionLoader.load(adbc, extensions),
+         :ok <- load_extensions_on(adbc, extensions),
          :ok <- apply_settings(adbc, settings),
          :ok <- run_statements(adbc, statements) do
       {:ok, %{adbc: adbc, database: database, max_rows: max_rows}}
@@ -428,8 +433,25 @@ defmodule Smolquery.Engine.Connection do
 
   @impl true
   def handle_call({:load_extensions, extensions}, _from, state) do
-    {:reply, ExtensionLoader.load(state.adbc, extensions), state}
+    {:reply, load_extensions_on(state.adbc, extensions), state}
   end
+
+  defp load_extensions_on(adbc, extensions) do
+    with :ok <- ExtensionLoader.load(adbc, extensions) do
+      apply_settings(adbc, ca_cert_file(extensions, CaBundle.path()))
+    end
+  end
+
+  defp ca_cert_file(_extensions, nil), do: []
+
+  defp ca_cert_file(extensions, bundle) do
+    if Enum.any?(extensions, &(extension_name(&1) == "httpfs")),
+      do: [ca_cert_file: bundle],
+      else: []
+  end
+
+  defp extension_name({name, _repository}), do: to_string(name)
+  defp extension_name(name), do: to_string(name)
 
   defp shaped({:ok, frame} = answer, adbc, sql, params) do
     with 0 <- Explorer.DataFrame.n_columns(frame),
