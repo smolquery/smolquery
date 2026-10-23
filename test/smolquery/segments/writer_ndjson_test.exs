@@ -266,7 +266,7 @@ defmodule Smolquery.Segments.WriterNdjsonTest do
       assert rows == [
                [1, "h1", 1, "OBJECT(host, n, tags)", ~s({"host":"h1","n":1,"tags":["a","b"]})],
                [2, "h2", nil, "OBJECT(host, n)", ~s({"host":"h2","n":"x"})],
-               [3, nil, nil, "VARIANT_NULL", "null"],
+               [3, nil, nil, "VARIANT_NULL", nil],
                [4, nil, nil, "VARCHAR", ~s("just a string")],
                [5, nil, nil, "ARRAY(2)", "[1,2]"]
              ]
