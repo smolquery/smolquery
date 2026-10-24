@@ -139,6 +139,7 @@ defmodule Smolquery.Engine.Connection do
   @unloadable_arrow "Arrow error: Polars cannot load a column of the result, " <>
                       "such as a VARIANT, which it has no type for"
   @unwrappable ["Parser Error", "Binder Error", "Catalog Error"]
+  @interval_in_type ~r/"(?:[^"]|"")*"|'(?:[^']|'')*'|\bINTERVAL\b/
   @unloadable_interval "Arrow error: Polars cannot load an INTERVAL column of the result; " <>
                          "cast it, to VARCHAR for its text or with epoch() for seconds"
   @session [TimeZone: "UTC"]
@@ -241,14 +242,8 @@ defmodule Smolquery.Engine.Connection do
   @spec describe(GenServer.server(), String.t(), [term()], timeout()) ::
           {:ok, [{String.t(), String.t()}]} | {:error, Exception.t()}
   def describe(conn, sql, params \\ [], timeout \\ 30_000) do
-    with {:ok, result} <- query(conn, "DESCRIBE " <> sql, params, timeout) do
-      {:ok,
-       Enum.map(result.rows, fn row ->
-         fields = result.columns |> Enum.zip(row) |> Map.new()
-
-         {fields["column_name"], fields["column_type"]}
-       end)}
-    end
+    with {:ok, result} <- query(conn, "DESCRIBE " <> sql, params, timeout),
+         do: {:ok, described_columns(result)}
   end
 
   @doc """
@@ -290,9 +285,14 @@ defmodule Smolquery.Engine.Connection do
   An `INTERVAL` column is exported as an Arrow interval, which Polars cannot
   load at all: its IPC reader panics (T-728). A timestamp minus a timestamp
   is one, so a duration column is an ordinary result. So the schema is read
-  for intervals too, and a result with one is asked for again with each such
-  column cast to `VARCHAR` (`3 days`, `01:00:00`), the same text on every
-  edge; a column that holds intervals in a list or a struct is cast whole.
+  for intervals too, and a result with one is asked for again with each
+  interval as its `VARCHAR` text (`3 days`, `01:00:00`), the same text on
+  every edge. A column that holds intervals inside a list, struct or map is
+  cast to its own type with `VARCHAR` in place of `INTERVAL`, read off one
+  `DESCRIBE` of the wrapped statement, so it keeps its shape and its other
+  fields' types (T-737): an `INTERVAL[]` answers a list of text, not one
+  display string. Only such a result pays for the `DESCRIBE`; a column that
+  is an interval itself is cast to `VARCHAR` without one.
   The statement runs twice, which only a result with an interval pays, and
   the answer is the second run's: a `now()` in it is read again. A
   statement that cannot be wrapped as a subquery (`EXECUTE`, `PRAGMA`, or
@@ -523,7 +523,7 @@ defmodule Smolquery.Engine.Connection do
     names = Enum.map(fields, &elem(&1, 0))
 
     case Enum.uniq(names -- Enum.uniq(names)) do
-      [] -> intervals(for {name, true} <- fields, do: name)
+      [] -> intervals(for {name, kind} <- fields, kind != nil, do: {name, kind})
       repeated -> {:repeated, repeated}
     end
   end
@@ -539,28 +539,73 @@ defmodule Smolquery.Engine.Connection do
   end
 
   defp intervals_as_text(adbc, sql, params, columns) do
-    case read_frame(adbc, interval_text_sql(sql, columns), params) do
-      {:error, {:interval_columns, _cast_did_not_take}} ->
-        unloadable_interval()
+    statement = "(" <> (sql |> String.trim() |> String.trim_trailing(";")) <> "\n)"
 
-      {:error, %Adbc.Error{message: message}} = error ->
-        if String.starts_with?(message, @unwrappable), do: unloadable_interval(), else: error
-
-      answer ->
-        answer
+    with {:ok, casts} <- text_casts(adbc, statement, params, columns) do
+      read_frame(adbc, "SELECT * REPLACE (#{casts}) FROM #{statement}", params)
     end
+    |> wrapped()
   end
+
+  defp wrapped({:error, {:interval_columns, _cast_did_not_take}}), do: unloadable_interval()
+  defp wrapped({:error, :interval_type_unknown}), do: unloadable_interval()
+
+  defp wrapped({:error, %Adbc.Error{message: message}} = error) do
+    if String.starts_with?(message, @unwrappable), do: unloadable_interval(), else: error
+  end
+
+  defp wrapped(answer), do: answer
 
   defp unloadable_interval, do: {:error, %Adbc.Error{message: @unloadable_interval}}
 
-  defp interval_text_sql(sql, columns) do
-    casts =
-      Enum.map_join(columns, ", ", fn column ->
-        quoted = Identifier.quote_label(column)
-        "CAST(#{quoted} AS VARCHAR) AS #{quoted}"
-      end)
+  defp text_casts(adbc, statement, params, columns) do
+    with {:ok, types} <- text_types(adbc, statement, params, columns) do
+      {:ok,
+       Enum.map_join(types, ", ", fn {column, type} ->
+         quoted = Identifier.quote_label(column)
+         "CAST(#{quoted} AS #{type}) AS #{quoted}"
+       end)}
+    end
+  end
 
-    "SELECT * REPLACE (#{casts}) FROM (#{String.trim_trailing(String.trim(sql), ";")}\n)"
+  defp text_types(adbc, statement, params, columns) do
+    if Enum.all?(columns, &match?({_name, :interval}, &1)) do
+      {:ok, for({name, :interval} <- columns, do: {name, "VARCHAR"})}
+    else
+      with {:ok, described} <- described_types(adbc, statement, params),
+           do: nested_text_types(columns, described)
+    end
+  end
+
+  defp described_types(adbc, statement, params) do
+    with {:ok, result} <-
+           adbc
+           |> Adbc.Connection.query("DESCRIBE SELECT * FROM " <> statement, params)
+           |> exception_shaped(),
+         {:ok, converted} <- convert(result, :infinity),
+         do: {:ok, Map.new(described_columns(converted))}
+  end
+
+  defp nested_text_types(columns, described) do
+    if Enum.all?(columns, fn {name, _kind} -> Map.has_key?(described, name) end),
+      do:
+        {:ok, for({name, _kind} <- columns, do: {name, text_type(Map.fetch!(described, name))})},
+      else: {:error, :interval_type_unknown}
+  end
+
+  defp described_columns(%Result{columns: columns, rows: rows}) do
+    Enum.map(rows, fn row ->
+      fields = columns |> Enum.zip(row) |> Map.new()
+
+      {fields["column_name"], fields["column_type"]}
+    end)
+  end
+
+  defp text_type(type) do
+    Regex.replace(@interval_in_type, type, fn
+      "INTERVAL" -> "VARCHAR"
+      quoted -> quoted
+    end)
   end
 
   defp duplicate_columns(repeated),

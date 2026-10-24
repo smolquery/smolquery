@@ -369,7 +369,7 @@ defmodule Smolquery.Engine.ConnectionTest do
                  "i" => "3 days",
                  "diff" => "01:00:00",
                  "secs" => "00:00:01.5",
-                 "l" => "['01:00:00']",
+                 "l" => ["01:00:00"],
                  "n" => 42
                }
              ]
@@ -414,6 +414,45 @@ defmodule Smolquery.Engine.ConnectionTest do
 
       assert Explorer.DataFrame.dtypes(shape) == %{"i" => :string, "n" => {:s, 32}}
       assert Process.alive?(conn)
+    end
+
+    test "an interval inside a list, struct or map keeps the shape its text would have (T-737)",
+         %{conn: conn} do
+      intervals =
+        ~s|SELECT [INTERVAL 1 HOUR, INTERVAL 2 DAY] AS l, {'d': INTERVAL 1 HOUR, 'n': 1} AS s, | <>
+          ~s|MAP {'a': INTERVAL 1 HOUR} AS m, [{'d': INTERVAL 1 HOUR}] AS ls, | <>
+          ~s|{'interval': INTERVAL 1 DAY, "my interval": INTERVAL 2 DAY} AS q|
+
+      texts =
+        ~s|SELECT ['01:00:00', '2 days'] AS l, {'d': '01:00:00', 'n': 1} AS s, | <>
+          ~s|MAP {'a': '01:00:00'} AS m, [{'d': '01:00:00'}] AS ls, | <>
+          ~s|{'interval': '1 day', "my interval": '2 days'} AS q|
+
+      assert {:ok, frame} = Connection.frame(conn, intervals, [], :infinity)
+      assert {:ok, expected} = Connection.frame(conn, texts, [], :infinity)
+
+      assert Explorer.DataFrame.to_rows(frame) == Explorer.DataFrame.to_rows(expected)
+      assert Explorer.DataFrame.dtypes(frame) == Explorer.DataFrame.dtypes(expected)
+
+      assert [%{"l" => ["01:00:00", "2 days"], "s" => %{"d" => "01:00:00", "n" => 1}}] =
+               Explorer.DataFrame.to_rows(frame)
+    end
+
+    test "several statements ending in a nested interval run once, and say how to cast (review of T-737)",
+         %{conn: conn} do
+      {:ok, _created} = Connection.query(conn, "CREATE TABLE t737 (n INTEGER)")
+
+      assert {:error, %Adbc.Error{message: message}} =
+               Connection.frame(
+                 conn,
+                 "SELECT 1 AS a; INSERT INTO t737 VALUES (1); SELECT [INTERVAL 1 DAY] AS l",
+                 [],
+                 :infinity
+               )
+
+      assert message =~ "INTERVAL"
+      assert Process.alive?(conn)
+      assert {:ok, %{rows: [[1]]}} = Connection.query(conn, "SELECT count(*) FROM t737")
     end
 
     test "a statement that cannot be wrapped says how to cast, and the connection lives",
