@@ -530,6 +530,19 @@ if size = System.get_env("SMOLQUERY_SEAL_ROW_GROUP_SIZE") do
       Smolquery.RuntimeConfig.positive_integer!("SMOLQUERY_SEAL_ROW_GROUP_SIZE", size)
 end
 
+# T-727: an optional `ROW_GROUP_SIZE_BYTES` beside it. DuckDB 2.0 reads a
+# long, compressible text column's huge PLAIN pages with a buffer per thread,
+# so capping the group's bytes caps the page and the read's memory.
+if bytes = System.get_env("SMOLQUERY_SEAL_ROW_GROUP_BYTES") do
+  config :smolquery, Smolquery.StorageService,
+    seal_row_group_bytes:
+      Smolquery.RuntimeConfig.integer_at_least!(
+        "SMOLQUERY_SEAL_ROW_GROUP_BYTES",
+        bytes,
+        1_048_576
+      )
+end
+
 # T-260: bytes alone do not bound a compaction group's merge cost — on
 # highly compressible data the decompressed row count diverges from the
 # compressed bytes by ~100x, and merge cost scales with rows.

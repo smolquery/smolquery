@@ -88,6 +88,19 @@ defmodule Smolquery.StorageService.RuntimeTest do
       end
     end
 
+    test "seal_row_group_bytes is off by default, and refuses anything under 1 MiB (T-727)" do
+      assert Runtime.new(name: __MODULE__.DefaultRowGroupBytes).seal_row_group_bytes == nil
+
+      assert Runtime.new(name: __MODULE__.RowGroupBytes, seal_row_group_bytes: 33_554_432).seal_row_group_bytes ==
+               33_554_432
+
+      for bytes <- [0, -1, 32, 1_048_575, "32MB"] do
+        assert_raise ArgumentError, ~r/unsupported seal_row_group_bytes/, fn ->
+          Runtime.new(name: __MODULE__.BadRowGroupBytes, seal_row_group_bytes: bytes)
+        end
+      end
+    end
+
     test "refuses a malformed compact_min_inputs at boot, naming the right key" do
       for min <- [nil, 0, "2"] do
         assert_raise ArgumentError, ~r/unsupported compact_min_inputs/, fn ->

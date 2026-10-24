@@ -190,7 +190,9 @@ defmodule Smolquery.StorageService.Merge do
   compression — measured at +25% sealed size on an unclustered table in
   `bench/sealer.exs` (64 micro-segments × 10k rows). At 1M rows that penalty
   runs the other way, so the gate is gone. The value is configured once at
-  boot as `seal_row_group_size` on `Smolquery.StorageService.Runtime`.
+  boot as `seal_row_group_size` on `Smolquery.StorageService.Runtime`, beside
+  an optional byte cap, `seal_row_group_bytes`, that closes a group of long
+  text early so DuckDB 2.0 can read its pages in bounded memory (T-727).
 
   ## A large span merge sorts window by window, so its memory is bounded (T-607)
 
@@ -280,7 +282,6 @@ defmodule Smolquery.StorageService.Merge do
   @drop_staging_timeout_ms 5_000
   @window_sample_rows 100_000
   @window_column "__merge_window"
-  @scratch_options "FORMAT PARQUET, COMPRESSION ZSTD"
 
   @doc """
   Merges `claim`'s micro-segments into the sealed segment its key names.
@@ -514,7 +515,7 @@ defmodule Smolquery.StorageService.Merge do
     with {:ok, select, urls} <- scan_select(runtime, schema, sources) do
       sql =
         "COPY (#{Schema.computed_select(schema, "(#{select})")}) " <>
-          "TO $#{length(urls) + 1} (#{@scratch_options})"
+          "TO $#{length(urls) + 1} (#{scratch_options(runtime)})"
 
       with {:ok, _result} <- query(runtime, sql, urls ++ [run], runtime.merge_staging_timeout_ms),
            do: :ok
@@ -544,7 +545,7 @@ defmodule Smolquery.StorageService.Merge do
                   ELSE len(list_filter(bounds.b, lambda bound: bound < rows.#{lead})) END
                AS #{@window_column}
       FROM read_parquet($1) AS rows, #{bounds} AS bounds
-    ) TO $2 (#{@scratch_options}, PARTITION_BY (#{@window_column}))
+    ) TO $2 (#{scratch_options(runtime)}, PARTITION_BY (#{@window_column}))
     """
 
     runs
@@ -569,7 +570,7 @@ defmodule Smolquery.StorageService.Merge do
   defp sort_windows(runtime, schema, dir) do
     sql =
       "COPY (SELECT * FROM read_parquet($1, hive_partitioning = false)#{order_by(schema)}) " <>
-        "TO $2 (#{@scratch_options})"
+        "TO $2 (#{scratch_options(runtime)})"
 
     [dir, "windows", "*", "#{@window_column}=*"]
     |> Path.join()
@@ -840,8 +841,15 @@ defmodule Smolquery.StorageService.Merge do
       end
 
     "FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)}, " <>
-      "ROW_GROUP_SIZE #{runtime.seal_row_group_size}#{field_ids}"
+      "ROW_GROUP_SIZE #{runtime.seal_row_group_size}" <>
+      "#{row_group_bytes(runtime.seal_row_group_bytes)}#{field_ids}"
   end
+
+  defp scratch_options(runtime),
+    do: "FORMAT PARQUET, COMPRESSION ZSTD" <> row_group_bytes(runtime.seal_row_group_bytes)
+
+  defp row_group_bytes(nil), do: ""
+  defp row_group_bytes(bytes), do: ", ROW_GROUP_SIZE_BYTES #{bytes}"
 
   defp order_by(%Schema{} = schema) do
     case Schema.clustering_columns(schema) do
