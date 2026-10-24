@@ -220,6 +220,14 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### Unreleased: ClickHouse macros bind again on an engine with Postgres attached (T-738)
+
+**TL;DR.** On DuckDB 2.0, HyperDX charts failed with `Binder Error: Macro toStartOfInterval() does not support the supplied arguments`. Every DuckDB database now opens with `disabled_optimizers = 'remote_pushdown'`, and they work again. Nothing to change on upgrade.
+
+- **What happened.** DuckDB 2.0 runs a new `remote_pushdown` optimizer whenever a Postgres database is attached. A job engine always has one: its DuckLake keeps its metadata there. The optimizer breaks any macro called with a column and an expression, like `toStartOfInterval(Timestamp, INTERVAL 1 MINUTE)`, `has(arr, [1, 2])` or the built-in `generate_subscripts`. Upstream: duckdb/duckdb-postgres#630.
+- **The cost.** A federated Postgres connection no longer gets 2.0's remote pushdown. DuckDB 1.5 had no remote pushdown either.
+- **Later.** The option comes out once a DuckDB release carries duckdb/duckdb#27793.
+
 ### Unreleased: DuckDB handles are released off the BEAM's schedulers (T-725)
 
 **TL;DR.** smolquery now builds on `smolquery/adbc` 0.12.2-smolquery.4. On DuckDB 2.0 a release could freeze a whole node for 30 s or more; it no longer can. Nothing to change on upgrade.

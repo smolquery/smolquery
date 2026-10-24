@@ -9,6 +9,20 @@ defmodule Smolquery.DuckDB do
   every open goes out with the node's configured value, and
   `Smolquery.Allocator` re-asserts it on a schedule for the gap a close
   leaves. See `Smolquery.Engine` for why the flag is on.
+
+  ## The remote pushdown optimizer is off (T-738)
+
+  DuckDB 2.0 runs a `remote_pushdown` optimizer whenever a catalog that can
+  run queries remotely is attached. A Postgres database is one: a job
+  engine's DuckLake keeps its metadata there, and a federated connection
+  may be one too. The optimizer breaks the binding of a macro called with
+  a column and an expression argument, so a ClickHouse client's
+  `toStartOfInterval(Timestamp, INTERVAL 1 MINUTE)` answers `Binder Error:
+  Macro ... does not support the supplied arguments`
+  (duckdb/duckdb-postgres#630). DuckDB 1.5 had no such optimizer.
+
+  So every database opens with it in `disabled_optimizers`. Drop it once a
+  DuckDB release carries the fix, duckdb/duckdb#27793.
   """
 
   @version Application.compile_env!(:smolquery, :duckdb_driver_version)
@@ -32,7 +46,8 @@ defmodule Smolquery.DuckDB do
     [
       driver: :duckdb,
       version: @version,
-      allocator_background_threads: to_string(allocator_background_threads?())
+      allocator_background_threads: to_string(allocator_background_threads?()),
+      disabled_optimizers: "remote_pushdown"
     ]
   end
 
