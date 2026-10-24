@@ -220,7 +220,35 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
-### Unreleased: the node runs as `smolquery` (uid 10001), not root (T-722)
+### 0.29.0: security, plug_crypto 2.2.1 (CVE-2026-105963, T-711)
+
+**TL;DR.** The first release with `plug_crypto` 2.2.1, the fix for EEF-CVE-2026-105963. Nothing to change on upgrade.
+
+### 0.29.0: an optional byte cap on sealed row groups, for long text on DuckDB 2.0 (T-727)
+
+**TL;DR.** DuckDB 2.0 reads a long, compressible text or JSON column of large Parquet pages with 1.4 to 1.8 times 1.5.3's memory per thread. A deployment that sees such reads run out of memory can cap the bytes of a sealed row group with `SMOLQUERY_SEAL_ROW_GROUP_BYTES`. Off by default.
+
+- **Who needs it.** On a JSON column of ~870-byte values, 32 threads needed about 11 GB, against 1.5.3's 6 to 8, to read row groups of about 100k rows (`SMOLQUERY_SEAL_ROW_GROUP_SIZE=100000`). 400k- and 1M-row groups (the default) read within 8 GB, and a 32 MB cap read in 2 GB. Check `SMOLQUERY_SEAL_ROW_GROUP_SIZE` first: unsetting a low value may be enough.
+- **The cost.** The cap applies to every table's seals and compactions, and to compaction's merge scratch files, so on a wide table it also cuts the 1M-row groups that keep `httpfs` request counts low (T-280). The minimum is `1048576`; a value meant in megabytes fails at boot.
+- **New data only.** Compaction never revisits a healthy-sized segment, so files already written keep their pages.
+- **Query partials** are now always written in row groups of about 32 MB, with nothing to set.
+
+### 0.29.0: 32 dirty I/O schedulers, and a cache of what sealed files say about their columns (T-719, T-723)
+
+**TL;DR.** A node now starts 32 dirty I/O schedulers instead of the BEAM's 10, and a query node keeps what each sealed file says about its columns, so a repeated query describes nothing twice.
+
+- **Threads.** Every DuckDB call waits on a dirty I/O scheduler, and a shard or a compaction now describes its files on up to 8 connections at once. 22 more threads, which sleep when idle. Set `SMOLQUERY_DIRTY_IO_SCHEDULERS` (1 to 1024) to change it; any other value fails boot.
+- **Memory.** The description cache keeps at most 10,000 files' column names and field ids per node (`config :smolquery, Smolquery.QueryService.DescriptionCache, max_entries:`). Budget for it on a tightly sized query pod.
+
+### 0.29.0: an `INTERVAL` result answers as text, keeping its shape (T-728, T-737)
+
+**TL;DR.** A result with an `INTERVAL` column failed on every edge: Polars cannot load DuckDB's Arrow interval. It now answers DuckDB's text, `3 days` or `01:00:00`, on every edge.
+
+- **Shapes.** An interval inside a list, struct or map answers as the same shape with text in it: `[INTERVAL 1 HOUR]` answers `["01:00:00"]`, and a struct keeps its other fields' types.
+- **Cost.** A result with an interval runs twice, and once more to `DESCRIBE` it when the interval is nested. Every other result is unchanged.
+- **One error.** A statement that cannot be wrapped as a subquery (`EXECUTE`, `PRAGMA`, or one ending in `; -- comment`) answers an error naming `INTERVAL` and the cast to write.
+
+### 0.29.0: the node runs as `smolquery` (uid 10001), not root (T-722)
 
 **TL;DR.** The image runs the release as user and group `smolquery`, 10001. A locked query engine may write any path it is allowed to read, the node's CA bundle among them, and as this user it cannot write a root-owned file.
 
@@ -230,7 +258,7 @@ One note per release, newest first.
 - **What stays read-only.** Everything under `/app` but `/app/tmp` (`RELEASE_TMP`, and the crash dump, `ERL_CRASH_DUMP`) and `/app/.tmp` (DuckDB's default spill root), the DuckDB extensions included: the image installs every extension it loads at build time, `sqlite` among them.
 - **A warning to watch for.** A node that can write the CA bundle it found (run as root, or `SSL_CERT_FILE` naming a file of its own) logs `the CA bundle … is writable by this node` once.
 
-### Unreleased: the engine is DuckDB 2.0.0, on the DuckLake 1.0 catalog (T-395)
+### 0.29.0: the engine is DuckDB 2.0.0, on the DuckLake 1.0 catalog (T-395)
 
 **TL;DR.** The engine moves from DuckDB 1.5.3 to 2.0.0. The catalog stays at DuckLake format 1.0: every attach pins `DUCKLAKE_VERSION '1.0'`, so a 2.0 node neither creates nor migrates a catalog to 2.0's own format (1.1-dev1). Upgrading the catalog format is a later, separate step.
 
