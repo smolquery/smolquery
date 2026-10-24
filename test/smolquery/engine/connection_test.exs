@@ -349,4 +349,83 @@ defmodule Smolquery.Engine.ConnectionTest do
       assert Result.one!(setting) == bundle
     end
   end
+
+  describe "frame/4 on an INTERVAL result (T-728)" do
+    setup do
+      {:ok, conn} = Connection.start_link(database: @database)
+      %{conn: conn}
+    end
+
+    test "answers each interval column as its text, the rest as they are", %{conn: conn} do
+      sql =
+        "SELECT INTERVAL 3 DAY AS i, " <>
+          "TIMESTAMP '2026-10-24 01:00:00' - TIMESTAMP '2026-10-24 00:00:00' AS diff, " <>
+          "to_seconds(1.5) AS secs, [INTERVAL 1 HOUR] AS l, 42 AS n;"
+
+      assert {:ok, frame} = Connection.frame(conn, sql, [], :infinity)
+
+      assert Explorer.DataFrame.to_rows(frame) == [
+               %{
+                 "i" => "3 days",
+                 "diff" => "01:00:00",
+                 "secs" => "00:00:01.5",
+                 "l" => "['01:00:00']",
+                 "n" => 42
+               }
+             ]
+    end
+
+    test "keeps the columns of an interval result with no rows", %{conn: conn} do
+      assert {:ok, frame} =
+               Connection.frame(
+                 conn,
+                 "SELECT INTERVAL 3 DAY AS i, 1 AS n WHERE false",
+                 [],
+                 :infinity
+               )
+
+      assert Explorer.DataFrame.names(frame) == ["i", "n"]
+      assert Explorer.DataFrame.n_rows(frame) == 0
+    end
+
+    test "casts a column whose name is an expression or needs quoting (review of T-728)",
+         %{conn: conn} do
+      sql =
+        ~s|SELECT max(t) - min(t), max(t) - min(t) AS "elapsed ""time""" | <>
+          "FROM (VALUES (TIMESTAMP '2026-10-24 00:00:00'), (TIMESTAMP '2026-10-24 02:30:00')) v(t)"
+
+      assert {:ok, frame} = Connection.frame(conn, sql, [], :infinity)
+
+      assert Explorer.DataFrame.to_rows(frame) == [
+               %{"(max(t) - min(t))" => "02:30:00", "elapsed \"time\"" => "02:30:00"}
+             ]
+    end
+
+    test "wraps a statement that ends in a line comment (review of T-728)", %{conn: conn} do
+      assert {:ok, frame} =
+               Connection.frame(conn, "SELECT INTERVAL 1 DAY AS i -- panel 3", [], :infinity)
+
+      assert Explorer.DataFrame.to_rows(frame) == [%{"i" => "1 day"}]
+    end
+
+    test "shape/4 of an interval result names its columns as text (review of T-728)",
+         %{conn: conn} do
+      assert {:ok, shape} = Connection.shape(conn, "SELECT INTERVAL 1 DAY AS i, 1 AS n")
+
+      assert Explorer.DataFrame.dtypes(shape) == %{"i" => :string, "n" => {:s, 32}}
+      assert Process.alive?(conn)
+    end
+
+    test "a statement that cannot be wrapped says how to cast, and the connection lives",
+         %{conn: conn} do
+      {:ok, _prepared} = Connection.query(conn, "PREPARE p AS SELECT INTERVAL 1 DAY AS i")
+
+      assert {:error, %Adbc.Error{message: message}} =
+               Connection.frame(conn, "EXECUTE p", [], :infinity)
+
+      assert message =~ "INTERVAL"
+      assert message =~ "VARCHAR"
+      assert {:ok, _result} = Connection.query(conn, "SELECT 1")
+    end
+  end
 end
