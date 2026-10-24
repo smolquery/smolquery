@@ -48,7 +48,7 @@ defmodule Smolquery.MixProject do
   defp deps do
     [
       {:adbc,
-       github: "smolquery/adbc", ref: "d8f1d00f68d93767ccd9ca5e087cba4c84284116", override: true},
+       github: "smolquery/adbc", ref: "c670b75dff7663dfab756872394a3bb176fa5701", override: true},
       {:explorer, "~> 0.12"},
       {:bandit, "~> 1.12"},
       {:plug, "~> 1.20"},

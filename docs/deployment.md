@@ -220,6 +220,14 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### Unreleased: DuckDB handles are released off the BEAM's schedulers (T-725)
+
+**TL;DR.** smolquery now builds on `smolquery/adbc` 0.12.2-smolquery.3. On DuckDB 2.0 a release could freeze a whole node for 30 s or more; it no longer can. Nothing to change on upgrade.
+
+- **What happened.** adbc released a DuckDB statement, connection or database on whichever BEAM scheduler dropped the last reference to it. DuckDB 2.0 takes a connection's lock to release a statement it prepared, and a query holds that lock while it binds, for example while it opens a file over `httpfs`. The release then blocked a normal scheduler until the bind ended, and every process and timer on that scheduler waited with it. DuckDB 1.5 did not take the lock there.
+- **What you may have seen.** Requests that time out with nothing slow in them, timers and telemetry handlers firing late, all at once on one node. The test suite froze for 50 to 120 s about two runs in three.
+- **The fix.** Each release now runs on a thread of the adbc NIF's own. A release stuck behind a long query still waits, but no scheduler waits with it.
+
 ### 0.29.0: security, plug_crypto 2.2.1 (CVE-2026-105963, T-711)
 
 **TL;DR.** The first release with `plug_crypto` 2.2.1, the fix for EEF-CVE-2026-105963. Nothing to change on upgrade.
