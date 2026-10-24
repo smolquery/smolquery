@@ -604,7 +604,8 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
         fetch: Query.fetcher(runtime, deadline)
       })
 
-    {:ok, series, _stats} = Eval.run(expr, context)
+    {:ok, series, _stats} =
+      watched("eval #{query} #{inspect(grid)}", fn -> Eval.run(expr, context) end)
 
     series
     |> render.(%{series: 0, duration_ms: 0})
@@ -613,8 +614,59 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
     |> Map.delete("stats")
   end
 
+  defp watched(label, fun) do
+    started = System.monotonic_time(:millisecond)
+    watchdog = spawn(fn -> watch(label, started, 5_000) end)
+
+    try do
+      fun.()
+    after
+      send(watchdog, :done)
+      elapsed = System.monotonic_time(:millisecond) - started
+      if elapsed > 2_000, do: IO.puts("T725 SLOW #{elapsed}ms #{label}")
+    end
+  end
+
+  defp watch(label, started, wait) do
+    receive do
+      :done -> :ok
+    after
+      wait ->
+        IO.puts(stall_report(label, System.monotonic_time(:millisecond) - started))
+        watch(label, started, 10_000)
+    end
+  end
+
+  defp stall_report(label, elapsed) do
+    in_nif =
+      for pid <- Process.list(),
+          info = Process.info(pid, [:current_function, :registered_name, :status, :dictionary]),
+          info != nil,
+          {module, _fun, _arity} <- [info[:current_function]],
+          module |> Atom.to_string() |> String.contains?(["Adbc", "adbc"]) do
+        stack =
+          pid
+          |> Process.info(:current_stacktrace)
+          |> then(&(&1 || {:current_stacktrace, []}))
+          |> elem(1)
+          |> Enum.take(6)
+
+        "  #{inspect(pid)} #{inspect(info[:registered_name])} #{info[:status]} " <>
+          "initial=#{inspect(info[:dictionary][:"$initial_call"])}\n    " <>
+          Enum.map_join(stack, "\n    ", &inspect/1)
+      end
+
+    """
+    T725 STALL #{elapsed}ms #{label}
+      run_queue_lengths_all=#{inspect(:erlang.statistics(:run_queue_lengths_all))}
+      dirty_io_schedulers=#{:erlang.system_info(:dirty_io_schedulers)} dirty_cpu=#{:erlang.system_info(:dirty_cpu_schedulers)} processes=#{length(Process.list())}
+      in adbc (#{length(in_nif)}):
+    #{Enum.join(in_nif, "\n")}
+    """
+  end
+
   defp answer(stack, path, params) do
-    response = get(stack, path, params)
+    response = watched("answer #{path} #{inspect(params)}", fn -> get(stack, path, params) end)
     assert response.status == 200, response.resp_body
     response |> body() |> Map.delete("stats")
   end
