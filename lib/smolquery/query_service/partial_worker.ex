@@ -126,6 +126,18 @@ defmodule Smolquery.QueryService.PartialWorker do
   inline, so a small partial splits into fewer buckets and the final does not
   open sixteen files for every 5 MB. A bucket no row
   hashed to writes no file, and a split that writes none spills whole.
+
+  ## Row groups of about 32 MB (T-727)
+
+  Every partial is written with `ROW_GROUP_SIZE_BYTES` 32 MB, which DuckDB
+  holds to within a chunk. DuckDB 2.0 reads each Parquet data page with a
+  buffer per thread, and the writer sizes a page by its row group: a partial
+  of a long text or JSON column in DuckDB's default 122,880-row groups holds
+  pages near 100 MB, and the merge reading many of them at 32 threads ran out
+  of an 8 GB limit. A partial is read once and deleted, so its row-group
+  count costs nothing that matters. DuckDB 2.0.0 keeps the cap with
+  insertion order preserved and over a `read_parquet` scan, which is how a
+  shard reads (checked: 205 groups of at most 34.8 MB from 87 MB pages).
   """
 
   alias Smolquery.AwsCredentials
@@ -143,6 +155,8 @@ defmodule Smolquery.QueryService.PartialWorker do
   alias Smolquery.QueryService.Views
   alias Smolquery.Segments.Store
   alias Smolquery.Telemetry
+
+  @partial_parquet "FORMAT parquet, ROW_GROUP_SIZE_BYTES 33554432"
 
   @type request :: %{
           required(:table_ref) => Smolquery.Catalog.table_ref(),
@@ -547,7 +561,7 @@ defmodule Smolquery.QueryService.PartialWorker do
   end
 
   defp copy_out(connection, partial_sql, params, path, timeout_ms) do
-    statement = "COPY (#{partial_sql}) TO #{Identifier.sql_string(path)} (FORMAT parquet)"
+    statement = "COPY (#{partial_sql}) TO #{Identifier.sql_string(path)} (#{@partial_parquet})"
 
     with {:ok, result} <- Connection.query(connection, statement, params, timeout_ms) do
       {:ok, copied_rows(result)}
@@ -602,7 +616,7 @@ defmodule Smolquery.QueryService.PartialWorker do
     statement =
       "COPY (SELECT *, (#{by}) % #{count} AS __pq_part " <>
         "FROM read_parquet(#{Identifier.sql_string(path)})) " <>
-        "TO #{Identifier.sql_string(directory)} (FORMAT parquet, PARTITION_BY (__pq_part))"
+        "TO #{Identifier.sql_string(directory)} (#{@partial_parquet}, PARTITION_BY (__pq_part))"
 
     with {:ok, _result} <-
            Connection.query(connection, statement, [], Map.get(request, :timeout_ms, :infinity)),
