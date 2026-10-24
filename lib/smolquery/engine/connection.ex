@@ -138,6 +138,9 @@ defmodule Smolquery.Engine.Connection do
   @unconvertible_arrow "Arrow error: the engine cannot convert a column of the result to Arrow"
   @unloadable_arrow "Arrow error: Polars cannot load a column of the result, " <>
                       "such as a VARIANT, which it has no type for"
+  @unwrappable ["Parser Error", "Binder Error", "Catalog Error"]
+  @unloadable_interval "Arrow error: Polars cannot load an INTERVAL column of the result; " <>
+                         "cast it, to VARCHAR for its text or with epoch() for seconds"
   @session [TimeZone: "UTC"]
 
   @type option ::
@@ -284,6 +287,19 @@ defmodule Smolquery.Engine.Connection do
   `Adbc.Error` saying "duplicate", which `SmolqueryPg.PgCatalog` re-selects
   under unique labels.
 
+  An `INTERVAL` column is exported as an Arrow interval, which Polars cannot
+  load at all: its IPC reader panics (T-728). A timestamp minus a timestamp
+  is one, so a duration column is an ordinary result. So the schema is read
+  for intervals too, and a result with one is asked for again with each such
+  column cast to `VARCHAR` (`3 days`, `01:00:00`), the same text on every
+  edge; a column that holds intervals in a list or a struct is cast whole.
+  The statement runs twice, which only a result with an interval pays, and
+  the answer is the second run's: a `now()` in it is read again. A
+  statement that cannot be wrapped as a subquery (`EXECUTE`, `PRAGMA`, or
+  one ending in `; -- comment`) answers an `Adbc.Error` that names
+  `INTERVAL` and the cast to write. Any other error of the second run is
+  answered as it is, so a fatal one still stops the connection.
+
   Arrow IPC carries the schema before any batch, so a statement that selects
   nothing keeps its names and types. Explorer's pointer read did not: a
   statement that selects nothing handed it no batch, and a frame built from no
@@ -406,7 +422,7 @@ defmodule Smolquery.Engine.Connection do
   @impl true
   def handle_call({:frame, sql, params}, _from, state) do
     state.adbc
-    |> read_frame(sql, params)
+    |> loadable_frame(sql, params)
     |> shaped(state.adbc, sql, params)
     |> exception_shaped()
     |> reply_or_stop(state)
@@ -466,7 +482,7 @@ defmodule Smolquery.Engine.Connection do
   defp shaped(answer, _adbc, _sql, _params), do: answer
 
   defp shape_of(adbc, sql, params) do
-    case adbc |> read_frame(shape_sql(sql), params) |> exception_shaped() do
+    case adbc |> loadable_frame(shape_sql(sql), params) |> exception_shaped() do
       {:ok, one} -> {:ok, Explorer.DataFrame.head(one, 0)}
       {:error, error} -> {:error, error}
     end
@@ -489,9 +505,10 @@ defmodule Smolquery.Engine.Connection do
   defp described(error), do: error
 
   defp load_ipc(ipc) do
-    case ipc |> IpcSchema.field_names() |> repeated_names() do
-      [] -> Explorer.DataFrame.load_ipc_stream(ipc)
-      repeated -> {:error, %Adbc.Error{message: duplicate_columns(repeated)}}
+    case ipc |> IpcSchema.fields() |> unloadable() do
+      :none -> Explorer.DataFrame.load_ipc_stream(ipc)
+      {:repeated, names} -> {:error, %Adbc.Error{message: duplicate_columns(names)}}
+      {:intervals, names} -> {:error, {:interval_columns, names}}
     end
   rescue
     error in ErlangError ->
@@ -500,8 +517,51 @@ defmodule Smolquery.Engine.Connection do
         else: reraise(error, __STACKTRACE__)
   end
 
-  defp repeated_names({:ok, names}), do: Enum.uniq(names -- Enum.uniq(names))
-  defp repeated_names(:error), do: []
+  defp unloadable(:error), do: :none
+
+  defp unloadable({:ok, fields}) do
+    names = Enum.map(fields, &elem(&1, 0))
+
+    case Enum.uniq(names -- Enum.uniq(names)) do
+      [] -> intervals(for {name, true} <- fields, do: name)
+      repeated -> {:repeated, repeated}
+    end
+  end
+
+  defp intervals([]), do: :none
+  defp intervals(names), do: {:intervals, names}
+
+  defp loadable_frame(adbc, sql, params) do
+    case read_frame(adbc, sql, params) do
+      {:error, {:interval_columns, columns}} -> intervals_as_text(adbc, sql, params, columns)
+      answer -> answer
+    end
+  end
+
+  defp intervals_as_text(adbc, sql, params, columns) do
+    case read_frame(adbc, interval_text_sql(sql, columns), params) do
+      {:error, {:interval_columns, _cast_did_not_take}} ->
+        unloadable_interval()
+
+      {:error, %Adbc.Error{message: message}} = error ->
+        if String.starts_with?(message, @unwrappable), do: unloadable_interval(), else: error
+
+      answer ->
+        answer
+    end
+  end
+
+  defp unloadable_interval, do: {:error, %Adbc.Error{message: @unloadable_interval}}
+
+  defp interval_text_sql(sql, columns) do
+    casts =
+      Enum.map_join(columns, ", ", fn column ->
+        quoted = Identifier.quote_label(column)
+        "CAST(#{quoted} AS VARCHAR) AS #{quoted}"
+      end)
+
+    "SELECT * REPLACE (#{casts}) FROM (#{String.trim_trailing(String.trim(sql), ";")}\n)"
+  end
 
   defp duplicate_columns(repeated),
     do: "duplicate column names in the result: " <> Enum.map_join(repeated, ", ", &inspect/1)

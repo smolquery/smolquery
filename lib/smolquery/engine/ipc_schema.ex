@@ -1,7 +1,7 @@
 defmodule Smolquery.Engine.IpcSchema do
   @moduledoc """
-  The top-level field names of an Arrow IPC stream, read from its schema
-  message without decoding a batch.
+  The top-level fields of an Arrow IPC stream, read from its schema message
+  without decoding a batch: each one's name, and whether Polars can load it.
 
   `Smolquery.Engine.Connection.frame/4` loads a result into Polars through
   Arrow IPC, and Polars' IPC reader does not refuse a schema that names a
@@ -10,43 +10,73 @@ defmodule Smolquery.Engine.IpcSchema do
   read here first, and a result that repeats one is refused before Polars
   sees it.
 
+  Polars' IPC reader also panics on an Arrow interval, which DuckDB exports
+  for every `INTERVAL` (T-728). So each field's type is read too, and a field
+  that is an interval, or holds one in a child (a list or a struct of
+  intervals), is marked before Polars sees the stream.
+
   The schema message is the stream's first: a continuation marker
   (`0xFFFFFFFF`), the metadata's length, and a `Message` flatbuffer whose
   header is the `Schema` table. Only the tables on the way to each `Field`'s
-  `name` are walked, by the field indices in Arrow's `Message.fbs` and
-  `Schema.fbs`.
+  `name`, `type_type` and `children` are walked, by the field indices in
+  Arrow's `Message.fbs` and `Schema.fbs`.
   """
 
   @message_header 2
   @schema_fields 1
   @field_name 0
+  @field_type_type 2
+  @field_children 5
+  @interval_type 11
+
+  @typedoc "A top-level field: its name, and whether it is or holds an Arrow interval."
+  @type field :: {String.t(), interval? :: boolean()}
 
   @doc """
-  The names of the stream's top-level fields, in order, or `:error` when
-  `ipc` does not start with a schema message this can read. A field Arrow
-  leaves unnamed reads as `""`.
+  The stream's top-level fields, in order, or `:error` when `ipc` does not
+  start with a schema message this can read. A field Arrow leaves unnamed
+  reads as `""`.
 
-      iex> Smolquery.Engine.IpcSchema.field_names(<<0, 1, 2>>)
+      iex> Smolquery.Engine.IpcSchema.fields(<<0, 1, 2>>)
       :error
   """
-  @spec field_names(binary()) :: {:ok, [String.t()]} | :error
-  def field_names(
+  @spec fields(binary()) :: {:ok, [field()]} | :error
+  def fields(
         <<0xFFFFFFFF::32, length::little-signed-32, metadata::binary-size(length), _::binary>>
       ) do
     message = table(metadata, uoffset(metadata, 0))
 
     with {:ok, schema} <- table_field(metadata, message, @message_header),
          {:ok, fields} <- vector_field(metadata, schema, @schema_fields) do
-      names(metadata, fields)
+      {:ok,
+       Enum.map(fields, fn position ->
+         field = table(metadata, position)
+         {name(metadata, field), interval?(metadata, field)}
+       end)}
     end
   rescue
     _malformed in [ArgumentError, MatchError] -> :error
   end
 
-  def field_names(_ipc), do: :error
+  def fields(_ipc), do: :error
 
-  defp names(buffer, fields) do
-    {:ok, Enum.map(fields, &name(buffer, table(buffer, &1)))}
+  defp interval?(buffer, field) do
+    type_tag(buffer, field) == @interval_type or
+      case vector_field(buffer, field, @field_children) do
+        {:ok, children} -> Enum.any?(children, &interval?(buffer, table(buffer, &1)))
+        :error -> false
+      end
+  end
+
+  defp type_tag(buffer, field) do
+    case field_position(buffer, field, @field_type_type) do
+      {:ok, position} ->
+        <<_::binary-size(^position), tag::8, _::binary>> = buffer
+        tag
+
+      :error ->
+        0
+    end
   end
 
   defp name(buffer, field) do

@@ -51,6 +51,19 @@ defmodule Smolquery.QueryService.ClientTest do
       assert DataFrame.to_columns(frame) == %{"zone" => ["UTC"]}
     end
 
+    test "a duration answers as its text, a timestamp minus a timestamp included (T-728)" do
+      name = start_service()
+
+      assert {:ok, %{state: :done}, frame} =
+               Client.query(
+                 name,
+                 "SELECT INTERVAL 3 DAY AS i, " <>
+                   "TIMESTAMP '2026-10-24 01:00:00' - TIMESTAMP '2026-10-24 00:00:00' AS d"
+               )
+
+      assert DataFrame.to_columns(frame) == %{"i" => ["3 days"], "d" => ["01:00:00"]}
+    end
+
     test "runs a query and returns the finished job with its frame" do
       name = start_service()
 
