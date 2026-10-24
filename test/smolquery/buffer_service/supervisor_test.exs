@@ -93,6 +93,7 @@ defmodule Smolquery.BufferService.SupervisorTest do
 
     [{buffer, _value}] = Registry.lookup(Runtime.registry(name), @table)
     registry = Process.whereis(Runtime.registry(name))
+    pool = Process.whereis(Runtime.write_pool(name))
 
     ref = Process.monitor(buffer)
     Process.exit(Process.whereis(Runtime.manifest(name)), :kill)
@@ -104,8 +105,18 @@ defmodule Smolquery.BufferService.SupervisorTest do
            end)
 
     assert Eventually.until(fn -> partitions_answer?(name) end)
+    assert Eventually.until(fn -> write_pool_restarted?(name, pool) end, 100, 50)
 
     assert {:ok, _ack} = write(name)
+  end
+
+  defp write_pool_restarted?(name, old_pool) do
+    case Process.whereis(Runtime.write_pool(name)) do
+      pool when pool in [nil, old_pool] -> false
+      pool -> match?(%{specs: specs, active: specs}, Supervisor.count_children(pool))
+    end
+  catch
+    :exit, _restarting_again -> false
   end
 
   defp partitions_answer?(name) do
