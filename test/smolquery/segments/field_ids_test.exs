@@ -30,7 +30,7 @@ defmodule Smolquery.Segments.FieldIdsTest do
              "b.parquet" => %{ids: nil, columns: ["id", "ts"]}
            }
 
-    assert FieldIds.ids_by_file(rows) == %{
+    assert rows |> FieldIds.by_file() |> FieldIds.ids() == %{
              "a.parquet" => %{"id" => 1, "attrs" => 3, "ts" => 4},
              "b.parquet" => nil
            }

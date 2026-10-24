@@ -47,11 +47,13 @@ defmodule Smolquery.Segments.FieldIds do
   end
 
   @doc """
-  The per-file ids alone, as `Smolquery.Schema.projection_by_id/2` takes them.
+  The per-file ids alone of `by_file/1`'s descriptions, as
+  `Smolquery.Schema.projection_by_id/2` takes them.
   """
-  @spec ids_by_file([[term()]]) :: %{String.t() => %{String.t() => pos_integer()} | nil}
-  def ids_by_file(rows),
-    do: rows |> by_file() |> Map.new(fn {file, %{ids: ids}} -> {file, ids} end)
+  @spec ids(%{String.t() => description()}) :: %{
+          String.t() => %{String.t() => pos_integer()} | nil
+        }
+  def ids(described), do: Map.new(described, fn {file, %{ids: ids}} -> {file, ids} end)
 
   defp describe(columns) do
     ids =

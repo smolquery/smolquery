@@ -6,7 +6,11 @@ defmodule Smolquery.EngineTest do
   alias Smolquery.Engine.CallExited
   alias Smolquery.Engine.Result
   alias Smolquery.Engine.ResultTooLarge
+  alias Smolquery.Schema
+  alias Smolquery.Segments.FieldIds
+  alias Smolquery.Segments.Store.Local
   alias Smolquery.Test.Eventually
+  alias Smolquery.Test.SegmentFixture
 
   @engine __MODULE__.Instance
 
@@ -186,6 +190,47 @@ defmodule Smolquery.EngineTest do
     test "returns CallExited instead of exiting when the connection is down" do
       assert {:error, %CallExited{reason: :noproc}} =
                Engine.try_query(__MODULE__.Missing, "SELECT 1")
+    end
+  end
+
+  describe "describe_files/3 (T-723)" do
+    @describetag :tmp_dir
+    test "answers what one parquet_schema statement does, on any of the engine's slots", %{
+      tmp_dir: dir
+    } do
+      schema = Schema.new!([{"id", :int64}, {"name", :string}])
+      store = Local.new(dir: dir)
+
+      paths =
+        for n <- 1..6 do
+          {:ok, segment} =
+            SegmentFixture.write([%{"id" => n, "name" => "n#{n}"}], schema, store: store)
+
+          segment.path
+        end
+
+      {:ok, one} =
+        Engine.query(@engine, FieldIds.sql(length(paths)), paths)
+
+      expected = FieldIds.by_file(one.rows)
+
+      assert Engine.describe_files(@engine, paths, max_chunk_files: 1) == {:ok, expected}
+      assert Engine.describe_files({@engine, 1}, paths) == {:ok, expected}
+      assert Engine.describe_files(@engine, []) == {:ok, %{}}
+    end
+
+    test "a wedged engine connection answers CallExited, so the compactor recycles it (review of T-723)" do
+      name = __MODULE__.WedgedDescribe
+      wedged = spawn_link(fn -> Process.sleep(:infinity) end)
+      Process.register(wedged, Engine.connection_name(name))
+
+      assert {:error, %CallExited{reason: :timeout}} =
+               Engine.describe_files(name, ["a.parquet"], timeout: 50)
+    end
+
+    test "returns CallExited instead of exiting when the engine is not running" do
+      assert {:error, %CallExited{reason: :noproc}} =
+               Engine.describe_files(__MODULE__.Missing, ["a.parquet"])
     end
   end
 

@@ -75,7 +75,9 @@ defmodule Smolquery.StorageService.Merge do
   re-stages its whole claim, so a budget the claim cannot fit inside is a
   merge that never finishes rather than one that finishes late.
 
-  Every engine call here goes through `Smolquery.Engine.try_query/4`, so a
+  Every engine call here goes through `Smolquery.Engine.try_query/4`, or
+  `Smolquery.Engine.describe_files/3` for the inputs' field ids, which
+  answers the same `CallExited` when the engine's own connection exits. So a
   call that exits — timed out against a connection wedged by an OOM, or busy
   behind another merge's `COPY` — is a merge failure, not a caller crash
   (T-251). The distinction matters most for the compactor, which merges every
@@ -271,6 +273,7 @@ defmodule Smolquery.StorageService.Merge do
   alias Smolquery.BufferService.SealConsumer
   alias Smolquery.Catalog
   alias Smolquery.Engine
+  alias Smolquery.EngineSecrets
   alias Smolquery.Identifier
   alias Smolquery.Schema
   alias Smolquery.Segments.FieldIds
@@ -382,14 +385,16 @@ defmodule Smolquery.StorageService.Merge do
   end
 
   defp file_field_ids(runtime, urls) do
-    urls
-    |> Enum.chunk_every(runtime.merge_inputs_per_call)
-    |> Enum.reduce_while({:ok, %{}}, fn chunk, {:ok, acc} ->
-      case query(runtime, FieldIds.sql(length(chunk)), chunk, runtime.merge_describe_timeout_ms) do
-        {:ok, result} -> {:cont, {:ok, Map.merge(acc, FieldIds.ids_by_file(result.rows))}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    opts = [
+      extensions: EngineSecrets.sealed_tier_extensions(runtime.store, runtime.engine_extensions),
+      timeout: runtime.merge_describe_timeout_ms,
+      max_chunk_files: runtime.merge_inputs_per_call
+    ]
+
+    case Engine.describe_files(Runtime.merge_engine(runtime), urls, opts) do
+      {:ok, described} -> {:ok, FieldIds.ids(described)}
+      {:error, error} -> {:error, {:merge_failed, error}}
+    end
   end
 
   defp registration_snapshots(runtime, table_ref, urls, field_ids) do
