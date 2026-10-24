@@ -2,6 +2,8 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
   use ExUnit.Case, async: false
 
   alias Explorer.DataFrame
+  alias Smolquery.Engine.Connection
+  alias Smolquery.Identifier
   alias Smolquery.QueryService.PartialWorker
   alias Smolquery.QueryService.Runtime
   alias Smolquery.Schema
@@ -110,6 +112,42 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
       assert bytes > 0
       assert location == Store.location(store, key)
       assert DataFrame.to_columns(DataFrame.from_parquet!(location))["s"] == [6]
+    end
+
+    test "a partial of long text is written in row groups of about 32 MB (T-727)",
+         %{request: request, tmp_dir: tmp_dir} do
+      database = start_supervised!({Smolquery.DuckDB, []})
+      conn = start_supervised!({Connection, database: database})
+      source = Path.join(tmp_dir, "long_text.parquet")
+
+      {:ok, _copied} =
+        Connection.query(
+          conn,
+          "COPY (SELECT repeat('abcdefgh', 128) || range AS t FROM range(60000)) " <>
+            "TO #{Identifier.sql_string(source)} (FORMAT parquet, ROW_GROUP_SIZE_BYTES 8388608)"
+        )
+
+      request =
+        Map.merge(request, %{
+          schema: Schema.new!([{"t", :string}]),
+          files: [%{"url" => source, "snapshot" => 1, "bytes" => File.stat!(source).size}],
+          partial_sql: "SELECT t FROM analytics.events",
+          spill: %{key: "burst-partials/job/7.parquet", inline_max_bytes: 0}
+        })
+
+      assert {:ok, %{rows: 60_000, spilled: %{location: location}}} =
+               PartialWorker.run_standalone(request)
+
+      assert {:ok, %{rows: [[count, biggest]]}} =
+               Connection.query(
+                 conn,
+                 "SELECT count(*), max(total_uncompressed_size) " <>
+                   "FROM parquet_metadata($1) WHERE path_in_schema = 't'",
+                 [location]
+               )
+
+      assert count > 1
+      assert biggest < 40_000_000
     end
 
     test "a spill with partitions is written split by the hash of its group keys (T-701)",
