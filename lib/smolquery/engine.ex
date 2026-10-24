@@ -85,6 +85,7 @@ defmodule Smolquery.Engine do
   alias Smolquery.Engine.CallExited
   alias Smolquery.Engine.Connection
   alias Smolquery.Engine.Log
+  alias Smolquery.Engine.ParallelDescribe
   alias Smolquery.Engine.Result
 
   @default_max_result_rows 100_000
@@ -252,6 +253,23 @@ defmodule Smolquery.Engine do
   def try_transaction(handle, statements, timeout \\ 30_000, opts \\ []) do
     catching_exit(fn -> transaction(handle, statements, timeout, opts) end)
   end
+
+  @doc """
+  What each of `urls` says about its columns, read several files at a time
+  through the engine's connection and helper connections to its database
+  (`Smolquery.Engine.ParallelDescribe`), with `opts` as it takes them. An
+  exit comes back as an error, as from `try_query/4`.
+  """
+  @spec describe_files(handle(), [String.t()], [ParallelDescribe.option()]) ::
+          {:ok, %{String.t() => Smolquery.Segments.FieldIds.description()}} | {:error, term()}
+  def describe_files(handle, urls, opts \\ []) do
+    engine = %{connection: connection(handle), database: database_name(engine_name(handle))}
+
+    catching_exit(fn -> ParallelDescribe.files(engine, urls, opts) end)
+  end
+
+  defp engine_name({name, _slot}), do: name
+  defp engine_name(name) when is_atom(name), do: name
 
   defp catching_exit(call) do
     call.()

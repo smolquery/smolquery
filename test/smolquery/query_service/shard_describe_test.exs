@@ -66,28 +66,6 @@ defmodule Smolquery.QueryService.ShardDescribeTest do
     end
   end
 
-  describe "chunks/3 and max_chunks/1" do
-    test "cuts the files into as many chunks as the engine has threads, at most the cap, in order" do
-      urls = for n <- 1..20, do: "u#{n}"
-
-      assert [[_, _, _, _, _], _, _, [_, _, _, _, _]] = ShardDescribe.chunks(urls, 8, 4)
-      assert [[_, _, _, _, _], _, _, [_, _, _, _, _]] = ShardDescribe.chunks(urls, 64, 4)
-      assert [[_ | _] = first, second] = ShardDescribe.chunks(urls, 2, 4)
-      assert first ++ second == urls
-      assert ShardDescribe.chunks(urls, 1, 4) == [urls]
-      assert ShardDescribe.chunks(["u1"], 8, 4) == [["u1"]]
-      assert ShardDescribe.chunks(["u1", "u2", "u3"], 8, 4) == [["u1"], ["u2"], ["u3"]]
-      assert ShardDescribe.chunks([], 8, 4) == []
-      assert [_, _, _, _, _, _, _] = ShardDescribe.chunks(urls, 8, 7)
-    end
-
-    test "max_chunks/1 is a fifth of the dirty I/O schedulers, at least 4 and at most 8 (T-723)" do
-      assert ShardDescribe.max_chunks(10) == 4
-      assert ShardDescribe.max_chunks(32) == 6
-      assert ShardDescribe.max_chunks(64) == 8
-    end
-  end
-
   describe "files/3" do
     setup %{tmp_dir: dir} = context do
       schema = Schema.new!([{"id", :int64}, {"name", :string}])
