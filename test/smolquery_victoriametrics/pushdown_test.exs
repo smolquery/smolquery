@@ -617,11 +617,14 @@ defmodule SmolqueryVictoriaMetrics.PushdownTest do
   defp watched(label, fun) do
     started = System.monotonic_time(:millisecond)
     watchdog = spawn(fn -> watch(label, started, 5_000) end)
+    marker = System.get_env("T725_MARKER")
+    if marker, do: File.write!(marker, label)
 
     try do
       fun.()
     after
       send(watchdog, :done)
+      if marker, do: File.rm(marker)
       elapsed = System.monotonic_time(:millisecond) - started
       if elapsed > 2_000, do: IO.puts("T725 SLOW #{elapsed}ms #{label}")
     end

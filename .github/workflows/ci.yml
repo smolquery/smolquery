@@ -53,7 +53,14 @@ jobs:
           restore-keys: mix-${{ runner.os }}-
 
       - run: mix deps.get
-      - run: mix test
+      - run: sudo apt-get install -y -qq gdb
+      - name: mix test, with the T-725 stall watcher
+        run: |
+          GDB="sudo gdb" .github/t725-stallwatch.sh "$RUNNER_TEMP/t725.marker" "$RUNNER_TEMP/stalls" "$GITHUB_WORKSPACE" &
+          T725_MARKER="$RUNNER_TEMP/t725.marker" mix test
+      - name: T-725 stall stacks
+        if: always()
+        run: for f in "$RUNNER_TEMP"/stalls/*.txt; do [ -f "$f" ] && { echo "== $f"; cat "$f"; }; done; true
 
   integration:
     name: Integration tests
