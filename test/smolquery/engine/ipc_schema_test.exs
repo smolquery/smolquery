@@ -53,7 +53,9 @@ defmodule Smolquery.Engine.IpcSchemaTest do
     assert IpcSchema.fields(<<0xFFFFFFFF::32, 8::little-32, 0::64>>) == :error
   end
 
-  test "marks the fields that are an interval, or hold one, and no other (T-728)", %{conn: conn} do
+  test "marks a field that is an interval apart from one that only holds one (T-728, T-737)", %{
+    conn: conn
+  } do
     sql =
       "SELECT INTERVAL 3 DAY AS i, 1 AS n, [INTERVAL 1 HOUR] AS l, {'d': INTERVAL 1 DAY} AS s, " <>
         "TIMESTAMP '2026-10-24 01:00:00' - TIMESTAMP '2026-10-24 00:00:00' AS diff, 'x' AS t, " <>
@@ -62,13 +64,13 @@ defmodule Smolquery.Engine.IpcSchemaTest do
     assert IpcSchema.fields(ipc(conn, sql)) ==
              {:ok,
               [
-                {"i", true},
-                {"n", false},
-                {"l", true},
-                {"s", true},
-                {"diff", true},
-                {"t", false},
-                {"plain", false}
+                {"i", :interval},
+                {"n", nil},
+                {"l", :nested},
+                {"s", :nested},
+                {"diff", :interval},
+                {"t", nil},
+                {"plain", nil}
               ]}
   end
 end

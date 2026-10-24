@@ -13,7 +13,8 @@ defmodule Smolquery.Engine.IpcSchema do
   Polars' IPC reader also panics on an Arrow interval, which DuckDB exports
   for every `INTERVAL` (T-728). So each field's type is read too, and a field
   that is an interval, or holds one in a child (a list or a struct of
-  intervals), is marked before Polars sees the stream.
+  intervals), is marked before Polars sees the stream: `:interval` for a field
+  that is one, `:nested` for a field that holds one.
 
   The schema message is the stream's first: a continuation marker
   (`0xFFFFFFFF`), the metadata's length, and a `Message` flatbuffer whose
@@ -29,8 +30,11 @@ defmodule Smolquery.Engine.IpcSchema do
   @field_children 5
   @interval_type 11
 
-  @typedoc "A top-level field: its name, and whether it is or holds an Arrow interval."
-  @type field :: {String.t(), interval? :: boolean()}
+  @typedoc """
+  A top-level field: its name, and `:interval` when its own type is an Arrow
+  interval, `:nested` when only a child holds one, `nil` when neither.
+  """
+  @type field :: {String.t(), :interval | :nested | nil}
 
   @doc """
   The stream's top-level fields, in order, or `:error` when `ipc` does not
@@ -51,7 +55,7 @@ defmodule Smolquery.Engine.IpcSchema do
       {:ok,
        Enum.map(fields, fn position ->
          field = table(metadata, position)
-         {name(metadata, field), interval?(metadata, field)}
+         {name(metadata, field), interval_kind(metadata, field)}
        end)}
     end
   rescue
@@ -59,6 +63,14 @@ defmodule Smolquery.Engine.IpcSchema do
   end
 
   def fields(_ipc), do: :error
+
+  defp interval_kind(buffer, field) do
+    cond do
+      type_tag(buffer, field) == @interval_type -> :interval
+      interval?(buffer, field) -> :nested
+      true -> nil
+    end
+  end
 
   defp interval?(buffer, field) do
     type_tag(buffer, field) == @interval_type or
