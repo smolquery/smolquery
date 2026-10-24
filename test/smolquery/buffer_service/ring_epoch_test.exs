@@ -71,12 +71,13 @@ defmodule Smolquery.BufferService.RingEpochTest do
     store = start_store()
     {:ok, _config} = Memory.ensure(store, scope(name), [@other])
     {:ok, _config} = Memory.advance(store, scope(name), 0, [node()])
+    Memory.age(store, scope(name), 57_000)
 
-    start_epoch(name, store, fn -> [node()] end, lease_ms: 150)
+    start_epoch(name, store, fn -> [node()] end, lease_ms: 60_000)
 
     ref = {"analytics", "events"}
     assert RingEpoch.check_write(name, ref) == {:error, :ownership_settling}
-    assert Eventually.until(fn -> RingEpoch.check_write(name, ref) == :ok end)
+    assert Eventually.until(fn -> RingEpoch.check_write(name, ref) == :ok end, 100, 100)
   end
 
   test "an acquisition older than one lease is already settled" do
