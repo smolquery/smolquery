@@ -164,6 +164,44 @@ defmodule Smolquery.StorageService.MergeTest do
     assert row_group_count(runtime, segment) > 1
   end
 
+  test "a row-group byte cap closes groups before the row count does (T-727)", %{
+    buffer: buffer,
+    runtime: runtime
+  } do
+    {:ok, prefix} = Store.prefix(@table)
+    capped_runtime = %{runtime | seal_row_group_bytes: 16_384}
+
+    groups =
+      for {merge_runtime, first, id} <- [
+            {runtime, 1, "01KYWPEEGAM8FQVQS5S2QF27A1"},
+            {capped_runtime, 20_001, "01KYWPEEGAM8FQVQS5S2QF27A2"}
+          ] do
+        ids =
+          seal_many(buffer, @table, [first..(first + 9_999), (first + 10_000)..(first + 19_999)])
+
+        {:ok, key} = Store.key(prefix, id)
+
+        assert {:ok, segment} = merge(merge_runtime, @table, claim(ids, [key]))
+        assert segment.row_count == 20_000
+        row_group_count(runtime, segment)
+      end
+
+    assert [1, capped] = groups
+    assert capped > 1
+  end
+
+  test "a row-group byte cap holds on a clustered table's ordered COPY too (review of T-727)",
+       %{buffer: buffer, runtime: runtime} do
+    :ok = Catalog.put_clustering(runtime.catalog, @table, ["id"])
+    runtime = %{runtime | seal_row_group_bytes: 16_384}
+
+    ids = seal_many(buffer, @table, [1..10_000, 10_001..20_000])
+
+    assert {:ok, segment} = merge(runtime, @table, claim(ids))
+    assert segment.row_count == 20_000
+    assert row_group_count(runtime, segment) > 1
+  end
+
   test "sets row group size when clustering columns are non-empty", %{
     buffer: buffer,
     runtime: runtime

@@ -19,6 +19,7 @@ defmodule Smolquery.StorageService.Runtime do
         engine_extensions: [:httpfs],
         compression: :zstd,
         seal_row_group_size: 1_048_576,
+        seal_row_group_bytes: nil,
         target_segment_bytes: 268_435_456,
         max_concurrent_seals: 2,
         gc_interval_ms: 300_000,
@@ -281,6 +282,22 @@ defmodule Smolquery.StorageService.Runtime do
   `compression`: a bad value discovered per attempt would crash every
   re-signalled seal forever.
 
+  `seal_row_group_bytes` (default `nil`) also passes `ROW_GROUP_SIZE_BYTES` to
+  every seal, compaction and merge scratch `COPY`, so a row group closes at
+  that many bytes even before `seal_row_group_size` rows (T-727). DuckDB 2.0's
+  Parquet reader holds a buffer per thread for each data page it decodes,
+  rounded up to a power of two, and the writer has no page-size option, so
+  what a read costs depends on the pages the writer chose. On a long,
+  compressible JSON column, files with 102k-row groups (a deployment that set
+  `seal_row_group_size` to 100_000) needed about 11 GB at 32 threads, where
+  1.5.3 needed 6 to 8; 400k- and 1M-row groups of the same data read within
+  8 GB; a 32 MB cap read it in 2 GB. The cap applies to every table, so on a
+  wide table it also shrinks the row groups `seal_row_group_size` keeps large
+  for `httpfs`, which is why it is off unless a deployment sets it. It must be
+  at least 1 MiB, so a value meant in megabytes fails at boot. It applies to
+  newly written segments only: compaction never revisits a healthy-sized
+  segment, so files already written keep their pages.
+
   `engine_extensions` are loaded into this service's own engine. `httpfs` is not
   optional in a real deployment — the merge reads micro-segments over HTTP, and an
   object-store tier would need it too — so it is the default rather than something
@@ -317,6 +334,7 @@ defmodule Smolquery.StorageService.Runtime do
     engine_memory_limit: nil,
     compression: :zstd,
     seal_row_group_size: 1_048_576,
+    seal_row_group_bytes: nil,
     target_segment_bytes: 268_435_456,
     max_concurrent_seals: 2,
     seal_backoff_base_ms: 30_000,
@@ -366,6 +384,7 @@ defmodule Smolquery.StorageService.Runtime do
           engine_memory_limit: String.t() | nil,
           compression: atom(),
           seal_row_group_size: pos_integer(),
+          seal_row_group_bytes: pos_integer() | nil,
           target_segment_bytes: pos_integer(),
           max_concurrent_seals: pos_integer(),
           seal_backoff_base_ms: non_neg_integer(),
@@ -410,6 +429,7 @@ defmodule Smolquery.StorageService.Runtime do
     :engine_memory_limit,
     :compression,
     :seal_row_group_size,
+    :seal_row_group_bytes,
     :target_segment_bytes,
     :max_concurrent_seals,
     :seal_backoff_base_ms,
@@ -448,6 +468,8 @@ defmodule Smolquery.StorageService.Runtime do
 
   @codecs [:zstd, :snappy, :gzip, :uncompressed]
 
+  @min_row_group_bytes 1_048_576
+
   @default_dir "priv/data/sealed"
 
   @doc """
@@ -482,6 +504,7 @@ defmodule Smolquery.StorageService.Runtime do
     |> validate_compact_span_budget()
     |> validate_compression()
     |> validate_seal_row_group_size()
+    |> validate_seal_row_group_bytes()
     |> validate_compact_bucket_ms()
     |> validate_compact_target()
     |> validate_compact_inputs()
@@ -838,6 +861,19 @@ defmodule Smolquery.StorageService.Runtime do
   defp validate_seal_row_group_size(%__MODULE__{seal_row_group_size: size}) do
     raise ArgumentError,
           "unsupported seal_row_group_size: #{inspect(size)} (expected a positive integer)"
+  end
+
+  defp validate_seal_row_group_bytes(%__MODULE__{seal_row_group_bytes: nil} = runtime),
+    do: runtime
+
+  defp validate_seal_row_group_bytes(%__MODULE__{seal_row_group_bytes: bytes} = runtime)
+       when is_integer(bytes) and bytes >= @min_row_group_bytes,
+       do: runtime
+
+  defp validate_seal_row_group_bytes(%__MODULE__{seal_row_group_bytes: bytes}) do
+    raise ArgumentError,
+          "unsupported seal_row_group_bytes: #{inspect(bytes)} " <>
+            "(expected nil or an integer of at least #{@min_row_group_bytes} bytes)"
   end
 
   defp validate_compact_bucket_ms(%__MODULE__{compact_bucket_ms: ms} = runtime)
