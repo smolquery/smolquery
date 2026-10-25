@@ -854,6 +854,15 @@ defmodule Smolquery.TelemetryTest do
     assert value("smolquery_compaction_backoffs_total") == before_backoffs + 1
   end
 
+  test "counts the scatter shards a node refused" do
+    before_refused = value("smolquery_query_shards_refused_total")
+
+    :telemetry.execute([:smolquery, :query, :shard, :refused], %{}, %{})
+    :telemetry.execute([:smolquery, :query, :shard, :refused], %{}, %{})
+
+    assert value("smolquery_query_shards_refused_total") == before_refused + 2
+  end
+
   test "counts job engines and their acquire time by source" do
     before_warm = value("smolquery_query_engines_total", ~s({source="warm"}))
     before_warm_us = value("smolquery_query_engine_microseconds_total", ~s({source="warm"}))

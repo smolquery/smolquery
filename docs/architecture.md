@@ -1211,8 +1211,19 @@ wider than one instance (`Smolquery.QueryService.Scatter`):
 4. The job engine merges the partials with the final query, inside the
    same result bound as any other query.
 
-Any worker failure falls back to the single-engine path, so distribution
-never fails a query that works without it. A distributed answer carries
+A node admits its shards: it runs at most `max_concurrent_shards` (`8`) at
+once, for peers and for its own `local_workers`, and refuses the next with
+`too_many_shards` before it starts an engine, the way it refuses a job past
+`max_concurrent_jobs`. One rule ends every shard, wherever it runs: a shard
+lives as long as the coordinator task that awaits it. When that task dies
+(the job was cancelled, timed out, fell back or crashed, or the connection
+to it dropped) a runner shard dies with it, and a peer or local shard's
+worker stops its engine and removes its output. A request that names no
+deadline gets the node's `default_timeout_ms`, never an unbounded one.
+
+Any worker failure, a `too_many_shards` refusal included, falls back to the
+single-engine path, so distribution never fails a query that works without
+it. A distributed answer carries
 `scatter` on the job (shard count, partial bytes); `null` means the ordinary
 scan answered, fallbacks included. It is on by default;
 `SMOLQUERY_DISTRIBUTED_QUERY=false` is the kill switch, and a job's own

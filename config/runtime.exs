@@ -844,7 +844,8 @@ end
 # decompose, runs the normal single-engine path; so does any distributed
 # failure. Each worker engine takes `SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT`
 # (default: `SMOLQUERY_JOB_MEMORY_LIMIT`, whole) and
-# `SMOLQUERY_DISTRIBUTED_WORKER_THREADS` (default: the read engine threads) —
+# `SMOLQUERY_DISTRIBUTED_WORKER_THREADS` (default: the read engine threads);
+# `SMOLQUERY_DISTRIBUTED_MAX_CONCURRENT_SHARDS` bounds the shards a node runs at once —
 # a node's declared scatter budget is workers x that limit on top of the job
 # engine's own, and nothing divides a size string for you.
 distributed_query =
@@ -855,6 +856,7 @@ distributed_query =
       {"SMOLQUERY_DISTRIBUTED_VALUE_LIST_MAX_ROWS", :value_list_max_rows, :positive_integer},
       {"SMOLQUERY_DISTRIBUTED_ROW_PARTIAL_MAX_ROWS", :row_partial_max_rows, :positive_integer},
       {"SMOLQUERY_DISTRIBUTED_LOCAL_WORKERS", :local_workers, :positive_integer},
+      {"SMOLQUERY_DISTRIBUTED_MAX_CONCURRENT_SHARDS", :max_concurrent_shards, :positive_integer},
       {"SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT", :worker_memory_limit, :string},
       {"SMOLQUERY_DISTRIBUTED_WORKER_THREADS", :worker_threads, :positive_integer}
     ],

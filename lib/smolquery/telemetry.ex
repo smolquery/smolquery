@@ -172,6 +172,9 @@ defmodule Smolquery.Telemetry do
                                           :off} — one per scatter shard that answered on a
                                           node with a file cache, decided against that
                                           node's index (T-630)
+      [:smolquery, :query, :shard, :refused]  %{}, %{} — one per scatter shard this node
+                                          refused with `:too_many_shards` because it already ran
+                                          `max_concurrent_shards`
       [:smolquery, :query, :file_cache, :sweep]  %{evicted_bytes, evicted_files} — one per
                                           FileCache sweep of the shared read cache (T-626)
       [:smolquery, :catalog, :op]         %{duration_us}, meta %{op: closed set, result: :ok | :error}
@@ -325,6 +328,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :query, :file_cache, :sweep],
     [:smolquery, :query, :file_cache, :decision],
     [:smolquery, :query, :file_cache, :shard],
+    [:smolquery, :query, :shard, :refused],
     [:smolquery, :query, :engine_probe],
     [:smolquery, :catalog, :op],
     [:smolquery, :catalog, :statement],
@@ -511,6 +515,9 @@ defmodule Smolquery.Telemetry do
     "smolquery_query_file_cache_shards_total" =>
       "Scatter shards on a node with a file cache, by the decision the shard made against " <>
         "its own node's cache: used, bypassed or off (T-630).",
+    "smolquery_query_shards_refused_total" =>
+      "Scatter shards this node refused because it already ran max_concurrent_shards; " <>
+        "the coordinator answered those jobs from its single engine.",
     "smolquery_query_file_cache_evicted_bytes_total" =>
       "Bytes the shared sealed-tier read cache deleted to stay under its cap (T-626).",
     "smolquery_query_file_cache_evicted_files_total" =>
@@ -1151,6 +1158,10 @@ defmodule Smolquery.Telemetry do
 
   def handle_event([:smolquery, :query, :file_cache, :shard], _measurements, meta, nil) do
     bump({"smolquery_query_file_cache_shards_total", [decision: cache_decision(meta)]}, 1)
+  end
+
+  def handle_event([:smolquery, :query, :shard, :refused], _measurements, _meta, nil) do
+    bump({"smolquery_query_shards_refused_total", []}, 1)
   end
 
   def handle_event([:smolquery, :query, :file_cache, :sweep], measurements, _meta, nil) do

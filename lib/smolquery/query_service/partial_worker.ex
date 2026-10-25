@@ -3,11 +3,11 @@ defmodule Smolquery.QueryService.PartialWorker do
   Runs one shard of a scattered query on whichever node it lands on (PL-49).
 
   `Smolquery.QueryService.WorkerTransport` calls `run/2`: directly on the
-  coordinator's own node, and over gen_rpc from a peer (T-364). Neither
-  path stops the worker when its caller gives up, so the request carries
-  the job's deadline, and the partial query runs under it: a shard whose
-  coordinator gave up stops at that deadline, and the `after` below kills
-  its engine. The request also carries everything shard-specific: the table
+  coordinator's own node, and over gen_rpc from a peer (T-364). gen_rpc
+  cannot stop a worker when its caller gives up, so the request carries the
+  pid of the coordinator process that awaits the shard (`caller`) and the
+  job's deadline. See "Admission" and "Dying with the caller" below. The
+  request also carries everything shard-specific: the table
   and its planned schema, this shard's files, the partial SQL that reads the
   planned table name, and the hot-tier URLs the shard may fetch. The view
   that defines the table over the files is rendered here, not on the
@@ -29,6 +29,41 @@ defmodule Smolquery.QueryService.PartialWorker do
   result leaves DuckDB as a parquet file (`COPY`), not through Arrow →
   Polars — DuckDB intermittently fails to read Polars-written parquet
   (PL-48) — and returns to the coordinator as the file's bytes.
+
+  ## Admission
+
+  A node runs at most `max_concurrent_shards` shards at once, whoever sent
+  them: peers, and this node's own `local_workers` when clustering is off.
+  `run/2` registers each shard in the runtime's registry with the value
+  `:shard`, which `Smolquery.QueryService.Client` does not count as a job,
+  counts the registered shards the way the client counts jobs, and refuses
+  with `{:error, :too_many_shards}` past the bound, before it builds an
+  engine, counting the refusal in `[:smolquery, :query, :shard, :refused]`.
+  It counts and then registers, as the client does for jobs, so shards
+  that arrive together can overshoot the bound by a few. The registration
+  goes when the shard ends, and with its process if that dies first. The
+  coordinator treats the refusal as any shard failure and falls back to its
+  single engine; dealing the shard to another peer instead is not built. A
+  runner shard retried on a peer can be refused there like any shard, and
+  the job then falls back. The refusal never reaches a protocol edge, so no
+  edge maps it.
+
+  ## Dying with the caller
+
+  A shard lives as long as the coordinator task that awaits it, wherever
+  it runs. A runner shard is a linked task
+  (`Smolquery.QueryService.WorkerTransport`). A peer or local shard cannot
+  be linked across gen_rpc, so its request carries that task as `caller`,
+  and once its engine exists the shard starts a watcher, linked to it, that
+  monitors `caller`. When the task goes down for any reason,
+  `:noconnection` included, the watcher stops the engine and removes the
+  output directory: the query dies, and a shard abandoned by a cancelled,
+  timed-out, fallen-back or crashed job frees the node at once, not at its
+  deadline. Stopping the engine kills processes the shard is linked to, so
+  the shard may die before its own `after` runs, which is why the watcher
+  cleans up too. A request without a deadline runs under the runtime's
+  `default_timeout_ms`. A standalone shard has no `caller`, since the
+  runner link already ends it.
 
   ## A standalone shard (PL-77)
 
@@ -165,6 +200,7 @@ defmodule Smolquery.QueryService.PartialWorker do
           required(:partial_sql) => String.t(),
           required(:allowed_paths) => [String.t()],
           optional(:timeout_ms) => timeout(),
+          optional(:caller) => pid(),
           optional(:file_cache) => FileCache.decision(),
           optional(:file_cache_mode) => :auto | boolean(),
           optional(:node_files) => [map()],
@@ -259,9 +295,41 @@ defmodule Smolquery.QueryService.PartialWorker do
   @spec run(atom(), request()) :: {:ok, reply()} | {:error, term()}
   def run(name, request) do
     case Runtime.fetch(name) do
-      {:ok, runtime} -> with_engine(runtime, request)
+      {:ok, runtime} -> admitted(runtime, request)
       :error -> {:error, :query_service_unavailable}
     end
+  end
+
+  @doc """
+  The deadline `request`'s partial query runs under: its own `timeout_ms`,
+  or `runtime`'s `default_timeout_ms` when it names none.
+  """
+  @spec shard_timeout(request(), Runtime.t()) :: timeout()
+  def shard_timeout(request, %Runtime{default_timeout_ms: default}),
+    do: Map.get(request, :timeout_ms, default)
+
+  defp admitted(runtime, request) do
+    registry = Runtime.registry(runtime.name)
+
+    if running_shards(registry) < runtime.distributed.max_concurrent_shards do
+      key = {:shard, make_ref()}
+      {:ok, _owner} = Registry.register(registry, key, :shard)
+
+      try do
+        with_engine(runtime, request)
+      after
+        Registry.unregister(registry, key)
+      end
+    else
+      :telemetry.execute([:smolquery, :query, :shard, :refused], %{}, %{})
+      {:error, :too_many_shards}
+    end
+  end
+
+  defp running_shards(registry) do
+    registry
+    |> Registry.select([{{:_, :_, :shard}, [], [true]}])
+    |> length()
   end
 
   @doc """
@@ -276,7 +344,8 @@ defmodule Smolquery.QueryService.PartialWorker do
       lockdown: &lockdown(spec.lockdown, spec.allowed_directories, spec.store, &1, &2),
       store: spec.store,
       descriptions: nil,
-      description_entries: 1
+      description_entries: 1,
+      timeout_ms: Map.get(request, :timeout_ms, :infinity)
     }
 
     case Telemetry.timed(fn -> JobEngine.start_standalone(standalone_options(spec)) end) do
@@ -379,7 +448,8 @@ defmodule Smolquery.QueryService.PartialWorker do
       lockdown: &lockdown(runtime.lockdown, runtime.allowed_directories, runtime.store, &1, &2),
       store: runtime.store,
       descriptions: Runtime.description_cache(runtime.name),
-      description_entries: DescriptionCache.max_entries()
+      description_entries: DescriptionCache.max_entries(),
+      timeout_ms: shard_timeout(request, runtime)
     }
 
     case Telemetry.timed(fn -> JobEngine.acquire(runtime) end) do
@@ -396,6 +466,7 @@ defmodule Smolquery.QueryService.PartialWorker do
 
     directory = output_directory_path()
     path = Path.join(directory, "partial.parquet")
+    watcher = watch(request, engine, directory)
 
     try do
       with :ok <- output_directory(directory),
@@ -416,7 +487,7 @@ defmodule Smolquery.QueryService.PartialWorker do
                  request.partial_sql,
                  Map.get(request, :params, []),
                  path,
-                 Map.get(request, :timeout_ms, :infinity)
+                 plan.timeout_ms
                )
              end),
            {:ok, partial} <- deliver(engine.connection, path, request, plan.store) do
@@ -445,9 +516,38 @@ defmodule Smolquery.QueryService.PartialWorker do
         {:error, reason} -> {:error, reason}
       end
     after
-      JobEngine.stop(engine)
-      File.rm_rf(directory)
+      unwatch(watcher)
+      release(engine, directory)
     end
+  end
+
+  defp release(engine, directory) do
+    JobEngine.stop(engine)
+    File.rm_rf(directory)
+  end
+
+  defp watch(%{caller: caller}, engine, directory) when is_pid(caller) do
+    shard = self()
+
+    spawn_link(fn ->
+      Process.flag(:trap_exit, true)
+      monitor = Process.monitor(caller)
+
+      receive do
+        {:DOWN, ^monitor, :process, ^caller, _reason} -> release(engine, directory)
+        {:EXIT, ^shard, _reason} -> release(engine, directory)
+      end
+    end)
+  end
+
+  defp watch(_request, _engine, _directory), do: nil
+
+  defp unwatch(nil), do: :ok
+
+  defp unwatch(watcher) do
+    Process.unlink(watcher)
+    Process.exit(watcher, :kill)
+    :ok
   end
 
   defp read_logging(connection, %{read_bytes: true}), do: ReadBytes.enabled?(connection)

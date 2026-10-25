@@ -41,6 +41,13 @@ defmodule Smolquery.QueryService.Scatter do
      deadline. A runner shard that fails, at the lease or on the runner, is
      retried once on a peer while more than the retry floor of the deadline
      remains (`Smolquery.Burst.Policy`); otherwise the job falls back.
+     A node admits only `max_concurrent_shards` shards at once and refuses
+     the rest with `:too_many_shards`, a shard failure like any other: the
+     job falls back to its single engine (dealing the refused shard to
+     another peer is not built). A shard, on a peer, here or on a runner,
+     lives as long as the task that awaits it, so a job that falls back,
+     times out or is cancelled leaves none running
+     (`Smolquery.QueryService.WorkerTransport`).
   4. Each shard decides for itself whether to read through its node's file
      cache (T-630): the request carries the job's cache mode, not the
      coordinator's verdict, because the shard's blocks land in its own

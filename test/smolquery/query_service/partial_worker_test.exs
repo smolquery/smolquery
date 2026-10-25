@@ -343,6 +343,20 @@ defmodule Smolquery.QueryService.PartialWorkerTest do
     end
   end
 
+  describe "shard_timeout/2" do
+    test "is the request's own deadline, or the runtime's default when it names none",
+         %{request: request} do
+      runtime = Runtime.new(name: :partial_worker_timeout_test, catalog: MapCatalog.new())
+
+      assert PartialWorker.shard_timeout(Map.put(request, :timeout_ms, 1_500), runtime) == 1_500
+
+      assert PartialWorker.shard_timeout(Map.put(request, :timeout_ms, :infinity), runtime) ==
+               :infinity
+
+      assert PartialWorker.shard_timeout(request, runtime) == runtime.default_timeout_ms
+    end
+  end
+
   describe "engine_spec/1" do
     test "takes the worker's limits and the store without its keys, and no local directories",
          %{tmp_dir: tmp_dir} do

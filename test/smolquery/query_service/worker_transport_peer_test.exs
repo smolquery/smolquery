@@ -11,11 +11,14 @@ defmodule Smolquery.QueryService.WorkerTransportPeerTest do
   use ExUnit.Case, async: false
 
   alias Smolquery.QueryService.WorkerTransport
+  alias Smolquery.Test.Eventually
+  alias Smolquery.Test.FixedCatalog
 
   @moduletag :integration
 
   @primary_port 15_371
   @peer_port 15_373
+  @slow_sql "SELECT max(a.range * b.range) FROM range(100000) a, range(100000) b"
   @request %{
     table_ref: {"analytics", "events"},
     schema: Smolquery.Schema.new!([{"id", :int64}]),
@@ -69,6 +72,107 @@ defmodule Smolquery.QueryService.WorkerTransportPeerTest do
 
     assert {:badrpc, :unauthorized} = :gen_rpc.call(destination, Map, :new, [], 5_000)
   end
+
+  describe "a peer running the query service" do
+    @describetag :tmp_dir
+
+    setup %{node: node, tmp_dir: tmp_dir} do
+      :ok = :erpc.call(node, :application, :set_env, [:smolquery, :spill_dir, tmp_dir])
+      {:ok, _started} = :erpc.call(node, Application, :ensure_all_started, [:adbc])
+
+      %{peer_pid: :erpc.call(node, System, :pid, []), tmp_dir: tmp_dir}
+    end
+
+    test "a shard whose caller gave up stops running on the peer", context do
+      %{node: node, peer_pid: peer_pid, tmp_dir: tmp_dir} = context
+      name = start_query_service(node, [])
+
+      caller =
+        spawn(fn -> WorkerTransport.call(node, name, slow_request(60_000), "job", 60_000) end)
+
+      assert Eventually.until(fn -> shard_directories(tmp_dir, peer_pid) != [] end, 200, 25),
+             "the shard never started on the peer"
+
+      Process.exit(caller, :kill)
+
+      assert Eventually.until(fn -> shard_directories(tmp_dir, peer_pid) == [] end, 100, 20),
+             "the peer still runs the abandoned shard: #{inspect(shard_directories(tmp_dir, peer_pid))}"
+    end
+
+    test "a peer with max_concurrent_shards 1 refuses the shards past its bound", context do
+      %{node: node, peer_pid: peer_pid, tmp_dir: tmp_dir} = context
+      name = start_query_service(node, distributed: [max_concurrent_shards: 1])
+
+      test_pid = self()
+
+      callers =
+        for index <- 1..4 do
+          spawn(fn ->
+            result =
+              WorkerTransport.call(node, name, slow_request(60_000), "job-#{index}", 60_000)
+
+            send(test_pid, {:result, index, result})
+          end)
+        end
+
+      assert Eventually.until(fn -> shard_directories(tmp_dir, peer_pid) != [] end, 200, 25),
+             "no shard started on the peer"
+
+      Eventually.until(
+        fn -> Enum.count_until(shard_directories(tmp_dir, peer_pid), 4) >= 4 end,
+        100,
+        20
+      )
+
+      running = Enum.count(shard_directories(tmp_dir, peer_pid))
+
+      refused =
+        for _refusal <- 1..3 do
+          assert_receive {:result, _index, result}, 5_000
+          result
+        end
+
+      Enum.each(callers, &Process.exit(&1, :kill))
+
+      assert running <= 1,
+             "peer ran #{running} shards at once with max_concurrent_shards: 1"
+
+      assert refused == List.duplicate({:error, :too_many_shards}, 3)
+    end
+  end
+
+  defp slow_request(timeout_ms),
+    do: Map.merge(@request, %{partial_sql: @slow_sql, timeout_ms: timeout_ms})
+
+  defp start_query_service(node, options) do
+    name = :"peer_query_#{:erlang.unique_integer([:positive])}"
+
+    options =
+      Keyword.merge(
+        [
+          name: name,
+          catalog: FixedCatalog.new(%{snapshot: 1, schemas: %{}, segments: %{}}),
+          engine_extensions: [],
+          warm_engines: 0
+        ],
+        options
+      )
+
+    code = """
+    {:ok, pid} =
+      Supervisor.start_link([{Smolquery.QueryService.Supervisor, options}], strategy: :one_for_one)
+
+    Process.unlink(pid)
+    pid
+    """
+
+    {_pid, _binding} = :erpc.call(node, Code, :eval_string, [code, [options: options]])
+
+    name
+  end
+
+  defp shard_directories(tmp_dir, peer_pid),
+    do: Path.wildcard(Path.join(tmp_dir, "smolquery-partial-#{peer_pid}-*"))
 
   defp ensure_distributed do
     case Node.start(:"smolquery_primary@127.0.0.1", :longnames) do
