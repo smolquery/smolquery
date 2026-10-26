@@ -220,6 +220,14 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### Unreleased: DuckDB releases finish before the node exits (T-741)
+
+**TL;DR.** smolquery now builds on `smolquery/adbc` 0.12.2-smolquery.5. In 0.29.1 a DuckDB release still queued when the node shut down was cut short. It now finishes first. Nothing to change on upgrade.
+
+- **What happened.** 0.29.1 moved DuckDB releases onto adbc's own threads (T-725). When the VM halted, `exit()` did not wait for them. A file database stopped just before shutdown did not finish closing, and left its `.wal` behind. A release could also still be running while `exit()` tore down DuckDB's static objects. The 0.29.1 arm64 image build aborted that way once, with heap corruption at exit.
+- **The fix.** The adbc NIF waits for queued releases, up to 30 s, as the VM halts. Each release chain, statement, connection, database, now runs in one job, so the wait sees all of it.
+- **What you may see.** A node with a release stuck behind a long query can take up to 30 s longer to exit.
+
 ### 0.29.1: ClickHouse macros bind again on an engine with Postgres attached (T-738)
 
 **TL;DR.** On DuckDB 2.0, HyperDX charts failed with `Binder Error: Macro toStartOfInterval() does not support the supplied arguments`. Every DuckDB database now opens with `disabled_optimizers = 'remote_pushdown'`, and they work again. Nothing to change on upgrade.
