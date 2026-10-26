@@ -220,7 +220,7 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
-### Unreleased: DuckDB releases finish before the node exits (T-741)
+### 0.29.2: DuckDB releases finish before the node exits (T-741)
 
 **TL;DR.** smolquery now builds on `smolquery/adbc` 0.12.2-smolquery.5. In 0.29.1 a DuckDB release still queued when the node shut down was cut short. It now finishes first. Nothing to change on upgrade.
 
