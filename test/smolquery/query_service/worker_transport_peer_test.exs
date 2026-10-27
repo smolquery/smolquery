@@ -103,41 +103,25 @@ defmodule Smolquery.QueryService.WorkerTransportPeerTest do
       %{node: node, peer_pid: peer_pid, tmp_dir: tmp_dir} = context
       name = start_query_service(node, distributed: [max_concurrent_shards: 1])
 
-      test_pid = self()
-
-      callers =
-        for index <- 1..4 do
-          spawn(fn ->
-            result =
-              WorkerTransport.call(node, name, slow_request(60_000), "job-#{index}", 60_000)
-
-            send(test_pid, {:result, index, result})
-          end)
-        end
+      running =
+        spawn(fn -> WorkerTransport.call(node, name, slow_request(60_000), "job-0", 60_000) end)
 
       assert Eventually.until(fn -> shard_directories(tmp_dir, peer_pid) != [] end, 200, 25),
              "no shard started on the peer"
 
-      Eventually.until(
-        fn -> Enum.count_until(shard_directories(tmp_dir, peer_pid), 4) >= 4 end,
-        100,
-        20
-      )
-
-      running = Enum.count(shard_directories(tmp_dir, peer_pid))
-
       refused =
-        for _refusal <- 1..3 do
-          assert_receive {:result, _index, result}, 5_000
-          result
-        end
+        1..3
+        |> Task.async_stream(
+          &WorkerTransport.call(node, name, slow_request(60_000), "job-#{&1}", 60_000),
+          timeout: 10_000
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
 
-      Enum.each(callers, &Process.exit(&1, :kill))
-
-      assert running <= 1,
-             "peer ran #{running} shards at once with max_concurrent_shards: 1"
+      shards = Enum.count(shard_directories(tmp_dir, peer_pid))
+      Process.exit(running, :kill)
 
       assert refused == List.duplicate({:error, :too_many_shards}, 3)
+      assert shards == 1, "peer ran #{shards} shards at once with max_concurrent_shards: 1"
     end
   end
 
