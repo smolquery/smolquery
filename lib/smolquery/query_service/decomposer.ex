@@ -1509,8 +1509,8 @@ defmodule Smolquery.QueryService.Decomposer do
   defp direction(%{"type" => "DESCENDING"}), do: "DESC"
   defp direction(_default), do: ""
 
-  defp nulls(%{"null_order" => "NULLS_FIRST"}), do: "NULLS FIRST"
-  defp nulls(%{"null_order" => "NULLS_LAST"}), do: "NULLS LAST"
+  defp nulls(%{"null_order" => "NULLS FIRST"}), do: "NULLS FIRST"
+  defp nulls(%{"null_order" => "NULLS LAST"}), do: "NULLS LAST"
   defp nulls(_default), do: ""
 
   defp quoted(name), do: "\"" <> String.replace(name, "\"", "\"\"") <> "\""

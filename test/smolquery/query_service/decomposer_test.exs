@@ -195,6 +195,17 @@ defmodule Smolquery.QueryService.DecomposerTest do
       )
     end
 
+    test "ORDER BY keeps an explicit null order", %{tmp_dir: tmp_dir} do
+      decomposition =
+        round_trip(
+          "SELECT tag, count(*) AS n FROM analytics.events " <>
+            "GROUP BY tag ORDER BY tag DESC NULLS FIRST, n ASC NULLS LAST",
+          tmp_dir
+        )
+
+      assert decomposition.final_tail =~ ~s|ORDER BY "tag" DESC NULLS FIRST, "n" ASC NULLS LAST|
+    end
+
     test "top-k orders and limits only at the final step", %{tmp_dir: tmp_dir} do
       decomposition =
         round_trip(
