@@ -32,6 +32,10 @@ ln -s "$PWD/skills/smolquery-pm" ~/.claude/skills/smolquery-pm    # global
 - **`smolquery-pm`** — project tracker (projects · plans · tasks) for this
   repo, stored in a dedicated smolsqls DB on the alpha deployment. Where plans
   live now — coordination happens through this database, not local markdown.
+- **`github-threads`** — follow-ups on the GitHub issues and PRs we take part
+  in, here and upstream: one task each in the tracker project
+  `github-threads`, and `check.sh`, a SessionStart hook that reports new
+  replies and untracked issues on this repo.
 
 `query-db` is an Elixir tool, so we query in Elixir. It's self-contained via
 `Mix.install` (needs `elixir` on `PATH`; the first run fetches Req).
