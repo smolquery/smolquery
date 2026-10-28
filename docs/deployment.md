@@ -220,6 +220,13 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### 0.29.3: Bandit 1.14.0 fixes HTTP/1 advisories
+
+**TL;DR.** smolquery now runs on Bandit 1.14.0. It fixes HTTP/1 advisories published 2026-10-26 against 1.13.0, and they reach every listener. Nothing to change on upgrade.
+
+- **What reaches us.** Quadratic parsing of `Content-Length` and port values (CVE-2026-113436), a chunked body sent as many tiny chunks holding many times its size (CVE-2026-111101), and chunk-extension and trailer request smuggling (CVE-2026-114216). They apply to the API, ClickHouse, VictoriaMetrics, hot server and metrics listeners. The HTTP/2 fixes do not apply: every listener runs with HTTP/2 off.
+- **What you may see.** HTTP/1 parsing is stricter. A request line must have exactly three words and the version must be `HTTP/1.1` or `HTTP/1.0`. An absolute-form target with an empty path before a query, like `http://host:80?a=b`, now gets a `400`. Standard clients (curl, HyperDX, vmagent, ClickHouse drivers) send neither.
+
 ### 0.29.2: DuckDB releases finish before the node exits (T-741)
 
 **TL;DR.** smolquery now builds on `smolquery/adbc` 0.12.2-smolquery.5. In 0.29.1 a DuckDB release still queued when the node shut down was cut short. It now finishes first. Nothing to change on upgrade.
