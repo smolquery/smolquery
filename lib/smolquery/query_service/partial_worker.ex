@@ -494,7 +494,7 @@ defmodule Smolquery.QueryService.PartialWorker do
       sealed ->
         {held, missing} = DescriptionCache.fetch(plan.descriptions, sealed)
 
-        with {:ok, read} <- ShardDescribe.files(engine, missing, plan.settings) do
+        with {:ok, read} <- ShardDescribe.files(engine, missing) do
           :ok = DescriptionCache.put(plan.descriptions, sealed, read, plan.description_entries)
           attach_ids(known, sealed, Map.merge(held, read))
         end

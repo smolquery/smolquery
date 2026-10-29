@@ -271,6 +271,14 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### Unreleased: a shard describes its files on every thread again (T-759)
+
+**TL;DR.** A query shard reads its sealed files' column ids in one `parquet_schema`, with `preserve_insertion_order` off for that read only. 120 files took 1.6 s through the old fan-out and now take 0.8 s at 8 threads, 0.22 s at 32. Nothing to change on upgrade.
+
+- **What happened.** On DuckDB 2.0, `parquet_schema` over a file list reads one file at a time while `preserve_insertion_order` is on (duckdb/duckdb#24273). 0.29.0 worked around it by cutting the list across up to 6 helper connections (T-719), so a describe never had more requests in flight than that.
+- **The change.** The shard turns the setting off, reads, and turns it back on before its engine locks down and runs the query, whether the read succeeded or not. The setting belongs to the whole database, so it is never left off for the job's own SQL. Compaction already ran with it off.
+- **What you may see.** Shards hold one dirty I/O scheduler while they describe instead of up to 6, and open no helper connections.
+
 ### 0.29.3: Bandit 1.14.1 fixes HTTP/1 advisories
 
 **TL;DR.** smolquery now runs on Bandit 1.14.1. It fixes HTTP/1 advisories published 2026-10-26 against 1.13.0, and they reach every listener. Nothing to change on upgrade.
