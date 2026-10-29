@@ -1,9 +1,10 @@
 # Deployment
 
-This document covers three topics:
+This document covers these topics:
 
 - How a release is published.
 - What the release artifacts contain.
+- How to tune the hot tier when sealing falls behind.
 - How to upgrade a deployment that holds data.
 
 For the full environment-variable reference, see
@@ -189,6 +190,56 @@ T-684. The policy's defaults come from the bench on 9 GB and 92 GB tables
 On 92 GB, 10 runners lost to the cluster on every shape and 25 won on every
 scan shape; 50 to 100 was flat; high-cardinality groups are bound by the
 coordinator's merge (T-685) whatever the count.
+
+## Tuning the hot tier
+
+**TL;DR.** A query reads every hot file of a table it cannot prune, over HTTP, one or two requests each. Keep each table's unsealed micro-segments few, and give queries a `WHERE` they can prune with.
+
+### What a hot file costs a query
+
+- Each group commit writes one Parquet micro-segment per table partition. At the default cadence that is up to one a second (`SMOLQUERY_FLUSH_INTERVAL_MS`), sooner when `SMOLQUERY_FLUSH_MAX_BYTES` fills first.
+- A table seals its unsealed tail at 64 micro-segments, 64 MiB, or 60 s after the oldest one (`SMOLQUERY_SEAL_MAX_FILES`, `SMOLQUERY_SEAL_MAX_BYTES`, `SMOLQUERY_SEAL_MAX_AGE_MS`). A table whose sealing keeps up holds a few dozen.
+- A query reads hot files from the hot server (`SMOLQUERY_HOT_SERVER_PORT`) over HTTP, on a single node too: one manifest read, then about one `HEAD` and one `GET` per file. 400 hot files are about 800 requests per query, times the queries running at once.
+- The planner prunes hot files by their column stats against the `WHERE` clause. `ORDER BY col LIMIT n` reads only the newest files that can reach the top n (T-400). A filter on the time column is the cheapest way to keep a query off old hot files.
+
+### How to tell sealing is behind
+
+Hundreds of unsealed micro-segments on one table means sealing is behind ingest.
+
+- `smolquery_buffer_unsealed_entries` against `smolquery_buffer_unsealed_entries_limit`: the micro-segments a buffer node holds across every table, and the depth at which it refuses commits.
+- `smolquery_seal_attempts_total{result}` and `smolquery_seal_segments_total{result}`: failing seals, or seals that take far fewer segments than arrive.
+- `smolquery_seal_stuck_attempts_total`: a nonzero rate means a claim may never seal.
+- `smolquery_hot_server_requests_total` growing faster than the queries do.
+
+### Levers
+
+**Seal faster.**
+
+- `SMOLQUERY_MAX_LIVE_CLAIMS` (`1`): above 1, one table seals several claims at once instead of one after the other.
+- `SMOLQUERY_MAX_CONCURRENT_SEALS` (`2`): seals in flight per storage node. The slots share the merge engine's memory limit.
+- A lower `SMOLQUERY_CLAIM_VALVE_FACTOR` (`16`): smaller claims, each faster to seal. It helps wide tables most.
+- More storage nodes.
+
+**Write fewer files.**
+
+- Send larger batches.
+- Raise `SMOLQUERY_FLUSH_INTERVAL_MS`. Acks wait longer.
+- Raise `SMOLQUERY_FLUSH_MAX_BYTES`. Each table holds more bytes before it commits.
+- Keep a table's partition count (`SMOLQUERY_WRITE_PARTITIONS`, or the table's own) at what its ingest needs. Each partition commits on its own, so each writes its own micro-segments.
+
+**Read fewer.**
+
+- Filter on the time column, so the planner skips the hot files the filter rules out.
+
+**Bound the damage.**
+
+- `SMOLQUERY_BACKLOG_MAX_ENTRIES` refuses commits with a `429` once a node holds too many unsealed micro-segments, before it holds more than it can adopt after a restart.
+
+There is no supported "seal this table now" action yet. T-743 adds one.
+
+### On macOS
+
+macOS has about 16,000 ephemeral ports and holds a closed connection in `TIME_WAIT` for 30 s, so one destination takes about 550 new connections a second. A single node with hundreds of hot files and several concurrent queries can run out, and hot reads then fail with `Could not connect to server`. That is the likely cause of [#557](https://github.com/smolquery/smolquery/issues/557), though it is not proven. Linux has a wider port range. On a dev box, seal more often (the levers above) rather than raise OS limits.
 
 ## When a peer dies without closing its sockets
 
