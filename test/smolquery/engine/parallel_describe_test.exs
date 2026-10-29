@@ -73,7 +73,7 @@ defmodule Smolquery.Engine.ParallelDescribeTest do
       paths: paths
     } do
       {:ok, one} = Connection.query(engine.connection, FieldIds.sql(length(paths)), paths)
-      expected = FieldIds.by_file(one.rows)
+      {:ok, expected} = FieldIds.by_file(one.rows)
 
       assert ParallelDescribe.files(engine, paths, []) == {:ok, expected}
       assert ParallelDescribe.files(engine, paths, max_chunk_files: 1) == {:ok, expected}

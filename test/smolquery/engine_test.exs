@@ -212,7 +212,7 @@ defmodule Smolquery.EngineTest do
       {:ok, one} =
         Engine.query(@engine, FieldIds.sql(length(paths)), paths)
 
-      expected = FieldIds.by_file(one.rows)
+      {:ok, expected} = FieldIds.by_file(one.rows)
 
       assert Engine.describe_files(@engine, paths, max_chunk_files: 1) == {:ok, expected}
       assert Engine.describe_files({@engine, 1}, paths) == {:ok, expected}

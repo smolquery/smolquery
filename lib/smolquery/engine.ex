@@ -237,7 +237,7 @@ defmodule Smolquery.Engine do
   @spec try_query(handle(), String.t(), [term()], timeout()) ::
           {:ok, Result.t()} | {:error, Exception.t()}
   def try_query(handle, sql, params \\ [], timeout \\ 30_000) do
-    catching_exit(fn -> query(handle, sql, params, timeout) end)
+    CallExited.catching(fn -> query(handle, sql, params, timeout) end)
   end
 
   @doc """
@@ -251,7 +251,7 @@ defmodule Smolquery.Engine do
   @spec try_transaction(handle(), [Connection.statement()], timeout(), keyword()) ::
           :ok | {:error, Exception.t()}
   def try_transaction(handle, statements, timeout \\ 30_000, opts \\ []) do
-    catching_exit(fn -> transaction(handle, statements, timeout, opts) end)
+    CallExited.catching(fn -> transaction(handle, statements, timeout, opts) end)
   end
 
   @doc """
@@ -265,17 +265,11 @@ defmodule Smolquery.Engine do
   def describe_files(handle, urls, opts \\ []) do
     engine = %{connection: connection(handle), database: database_name(engine_name(handle))}
 
-    catching_exit(fn -> ParallelDescribe.files(engine, urls, opts) end)
+    CallExited.catching(fn -> ParallelDescribe.files(engine, urls, opts) end)
   end
 
   defp engine_name({name, _slot}), do: name
   defp engine_name(name) when is_atom(name), do: name
-
-  defp catching_exit(call) do
-    call.()
-  catch
-    :exit, reason -> {:error, CallExited.new(reason)}
-  end
 
   @doc """
   Same as `query/3` but raises on error.

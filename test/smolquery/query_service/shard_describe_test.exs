@@ -3,6 +3,7 @@ defmodule Smolquery.QueryService.ShardDescribeTest do
 
   alias Smolquery.Engine.CallExited
   alias Smolquery.Engine.Connection
+  alias Smolquery.Engine.Result
   alias Smolquery.QueryService.JobEngine
   alias Smolquery.QueryService.ShardDescribe
   alias Smolquery.Schema
@@ -67,7 +68,42 @@ defmodule Smolquery.QueryService.ShardDescribeTest do
     end
   end
 
-  describe "files/3" do
+  defmodule FakeConnection do
+    @moduledoc false
+    use GenServer
+
+    def start(test, script), do: GenServer.start(__MODULE__, {test, script}, name: __MODULE__)
+
+    def stop do
+      case Process.whereis(__MODULE__) do
+        nil -> :ok
+        pid -> GenServer.stop(pid)
+      end
+    end
+
+    @impl GenServer
+    def init(state), do: {:ok, state}
+
+    @impl GenServer
+    def handle_call({:query, sql, _params}, _from, {test, script} = state) do
+      send(test, {:sql, sql})
+
+      case script.(sql) do
+        :exit -> {:stop, :read_exited, state}
+        reply -> {:reply, reply, state}
+      end
+    end
+
+    @impl GenServer
+    def terminate(:read_exited, {test, script}) do
+      Process.unregister(__MODULE__)
+      {:ok, _successor} = start(test, script)
+    end
+
+    def terminate(_reason, _state), do: :ok
+  end
+
+  describe "files/2" do
     setup %{tmp_dir: dir} = context do
       schema = Schema.new!([{"id", :int64}, {"name", :string}])
       store = Local.new(dir: dir)
@@ -120,7 +156,7 @@ defmodule Smolquery.QueryService.ShardDescribeTest do
       assert :atomics.get(counters, 2) > 1
 
       {:ok, one} = Connection.query(engine.connection, FieldIds.sql(length(urls)), urls)
-      assert described == FieldIds.by_file(one.rows)
+      assert {:ok, described} == FieldIds.by_file(one.rows)
       assert map_size(described) == 16
     end
 
@@ -177,6 +213,61 @@ defmodule Smolquery.QueryService.ShardDescribeTest do
 
     assert {:error, %CallExited{}} =
              ShardDescribe.files(%{connection: gone}, ["http://x/a.parquet"])
+  end
+
+  describe "files/2 against a scripted connection" do
+    @tag :capture_log
+    test "a read that exits still puts the setting back, and answers the read's exit" do
+      fake(fn
+        "SELECT current_setting" <> _rest -> {:ok, %Result{rows: [[true]]}}
+        "SET " <> _rest -> {:ok, %Result{}}
+        "SELECT file_name" <> _rest -> :exit
+      end)
+
+      assert {:error, %CallExited{reason: :read_exited}} =
+               ShardDescribe.files(%{connection: FakeConnection}, ["a.parquet"])
+
+      assert_received {:sql, "SET preserve_insertion_order = false"}
+      assert_receive {:sql, "SET preserve_insertion_order = true"}
+    end
+
+    test "a setting of another shape is an error, and nothing is set" do
+      fake(fn "SELECT current_setting" <> _rest -> {:ok, %Result{rows: [["true"]]}} end)
+
+      assert {:error, {:unexpected_setting, :preserve_insertion_order, [["true"]]}} =
+               ShardDescribe.files(%{connection: FakeConnection}, ["a.parquet"])
+
+      refute_received {:sql, "SET " <> _rest}
+    end
+
+    test "a setting that cannot be put back fails a read that succeeded" do
+      fake(fn
+        "SELECT current_setting" <> _rest -> {:ok, %Result{rows: [[true]]}}
+        "SET preserve_insertion_order = false" -> {:ok, %Result{}}
+        "SET preserve_insertion_order = true" -> {:error, %Adbc.Error{message: "restore"}}
+        "SELECT file_name" <> _rest -> {:ok, %Result{rows: [["a.parquet", "s", 0, nil]]}}
+      end)
+
+      assert {:error, %Adbc.Error{message: "restore"}} =
+               ShardDescribe.files(%{connection: FakeConnection}, ["a.parquet"])
+    end
+
+    test "a read that fails keeps its own error when the setting cannot be put back either" do
+      fake(fn
+        "SELECT current_setting" <> _rest -> {:ok, %Result{rows: [[true]]}}
+        "SET preserve_insertion_order = false" -> {:ok, %Result{}}
+        "SET preserve_insertion_order = true" -> {:error, %Adbc.Error{message: "restore"}}
+        "SELECT file_name" <> _rest -> {:error, %Adbc.Error{message: "read"}}
+      end)
+
+      assert {:error, %Adbc.Error{message: "read"}} =
+               ShardDescribe.files(%{connection: FakeConnection}, ["a.parquet"])
+    end
+  end
+
+  defp fake(script) do
+    {:ok, _pid} = FakeConnection.start(self(), script)
+    on_exit(fn -> FakeConnection.stop() end)
   end
 
   defp insertion_order(engine) do

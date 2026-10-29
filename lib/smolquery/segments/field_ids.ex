@@ -16,7 +16,17 @@ defmodule Smolquery.Segments.FieldIds do
   columns, so the walk skips each subtree by its `num_children`. A file with
   ids on some columns and not others is read as having none: the writer
   stamps all or nothing, so a partial stamp is not a file this system wrote.
+
+  The walk reads a file's rows in the order DuckDB answers them, root first,
+  and nothing in the SQL pins that order: both readers run with
+  `preserve_insertion_order` off, so the scan stays parallel (T-759).
+  DuckDB keeps a file's rows in order within a chunk, and a file of 3,001
+  rows split across chunks came back in order every time, but a file whose
+  rows do not walk as one tree, using every row and no more, is an error
+  rather than a guess at its columns.
   """
+
+  alias Smolquery.Engine.Connection
 
   @typedoc """
   One file's columns: `ids` maps each top-level column name to its id, or is
@@ -35,14 +45,31 @@ defmodule Smolquery.Segments.FieldIds do
   end
 
   @doc """
-  The per-file description from the rows `sql/1` answers.
+  The per-file descriptions of `urls`, read with one `sql/1` on
+  `connection`, each read bounded by `timeout`.
   """
-  @spec by_file([[term()]]) :: %{String.t() => description()}
+  @spec read(GenServer.server(), [String.t()], timeout()) ::
+          {:ok, %{String.t() => description()}} | {:error, term()}
+  def read(connection, urls, timeout) do
+    with {:ok, result} <- Connection.query(connection, sql(length(urls)), urls, timeout),
+         do: by_file(result.rows)
+  end
+
+  @doc """
+  The per-file description from the rows `sql/1` answers, or
+  `{:error, {:unreadable_schema, file}}` for the first file whose rows do not
+  walk as one schema tree.
+  """
+  @spec by_file([[term()]]) ::
+          {:ok, %{String.t() => description()}} | {:error, {:unreadable_schema, String.t()}}
   def by_file(rows) do
     rows
     |> Enum.group_by(&hd/1, &tl/1)
-    |> Map.new(fn {file, [[_root, count, _id] | columns]} ->
-      {file, describe(top_level(columns, count || 0, []))}
+    |> Enum.reduce_while({:ok, %{}}, fn {file, file_rows}, {:ok, described} ->
+      case walk(file_rows) do
+        {:ok, columns} -> {:cont, {:ok, Map.put(described, file, describe(columns))}}
+        :error -> {:halt, {:error, {:unreadable_schema, file}}}
+      end
     end)
   end
 
@@ -55,6 +82,13 @@ defmodule Smolquery.Segments.FieldIds do
         }
   def ids(described), do: Map.new(described, fn {file, %{ids: ids}} -> {file, ids} end)
 
+  defp walk([[_root, count, _id] | rows]) do
+    case top_level(rows, count || 0, []) do
+      {[], columns} -> {:ok, columns}
+      _short_or_left_over -> :error
+    end
+  end
+
   defp describe(columns) do
     ids =
       if Enum.all?(columns, fn {_name, id} -> is_integer(id) end), do: Map.new(columns), else: nil
@@ -62,13 +96,19 @@ defmodule Smolquery.Segments.FieldIds do
     %{ids: ids, columns: columns |> Enum.map(&elem(&1, 0)) |> Enum.reverse()}
   end
 
-  defp top_level(_rows, 0, columns), do: columns
+  defp top_level(rows, 0, columns), do: {rows, columns}
+  defp top_level([], _remaining, _columns), do: :short
 
-  defp top_level([[name, children, id] | rest], remaining, columns),
-    do: rest |> skip_subtree(children || 0) |> top_level(remaining - 1, [{name, id} | columns])
+  defp top_level([[name, children, id] | rest], remaining, columns) do
+    with rest when is_list(rest) <- skip_subtree(rest, children || 0),
+         do: top_level(rest, remaining - 1, [{name, id} | columns])
+  end
 
   defp skip_subtree(rows, 0), do: rows
+  defp skip_subtree([], _remaining), do: :short
 
-  defp skip_subtree([[_name, children, _id] | rest], remaining),
-    do: rest |> skip_subtree(children || 0) |> skip_subtree(remaining - 1)
+  defp skip_subtree([[_name, children, _id] | rest], remaining) do
+    with rest when is_list(rest) <- skip_subtree(rest, children || 0),
+         do: skip_subtree(rest, remaining - 1)
+  end
 end

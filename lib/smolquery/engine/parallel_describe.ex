@@ -76,7 +76,7 @@ defmodule Smolquery.Engine.ParallelDescribe do
           | {:max_chunk_files, pos_integer()}
 
   @doc """
-  The per-file descriptions of `urls`, as `FieldIds.by_file/1` answers them.
+  The per-file descriptions of `urls`, as `FieldIds.read/3` answers them.
   """
   @spec files(engine(), [String.t()], [option()]) ::
           {:ok, %{String.t() => FieldIds.description()}} | {:error, term()}
@@ -145,7 +145,7 @@ defmodule Smolquery.Engine.ParallelDescribe do
   defp settings(connection, timeout) do
     sql = "SELECT current_setting('threads'), current_setting('temp_directory')"
 
-    on_engine_call(fn ->
+    CallExited.catching(fn ->
       with {:ok, %Result{rows: [[threads, directory]]}} <-
              Connection.query(connection, sql, [], timeout),
            do: {:ok, threads, directory}
@@ -153,13 +153,7 @@ defmodule Smolquery.Engine.ParallelDescribe do
   end
 
   defp on_engine(connection, chunks, timeout),
-    do: on_engine_call(fn -> read(connection, chunks, timeout) end)
-
-  defp on_engine_call(call) do
-    call.()
-  catch
-    :exit, reason -> {:error, CallExited.new(reason)}
-  end
+    do: CallExited.catching(fn -> read(connection, chunks, timeout) end)
 
   defp helper_options(engine, temp_directory, opts) do
     [
@@ -207,7 +201,7 @@ defmodule Smolquery.Engine.ParallelDescribe do
 
   defp read(connection, chunks, timeout) do
     Enum.reduce_while(chunks, {:ok, %{}}, fn chunk, {:ok, described} ->
-      case describe(connection, chunk, timeout) do
+      case FieldIds.read(connection, chunk, timeout) do
         {:ok, more} -> {:cont, {:ok, Map.merge(described, more)}}
         {:error, _reason} = error -> {:halt, error}
       end
@@ -232,11 +226,6 @@ defmodule Smolquery.Engine.ParallelDescribe do
 
         {:error, reason}
     end
-  end
-
-  defp describe(connection, urls, timeout) do
-    with {:ok, result} <- Connection.query(connection, FieldIds.sql(length(urls)), urls, timeout),
-         do: {:ok, FieldIds.by_file(result.rows)}
   end
 
   defp merged({:exit, reason}, result),

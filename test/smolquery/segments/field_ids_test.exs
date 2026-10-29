@@ -22,7 +22,9 @@ defmodule Smolquery.Segments.FieldIdsTest do
       ["b.parquet", "ts", nil, 4]
     ]
 
-    assert FieldIds.by_file(rows) == %{
+    assert {:ok, described} = FieldIds.by_file(rows)
+
+    assert described == %{
              "a.parquet" => %{
                ids: %{"id" => 1, "attrs" => 3, "ts" => 4},
                columns: ["id", "attrs", "ts"]
@@ -30,9 +32,24 @@ defmodule Smolquery.Segments.FieldIdsTest do
              "b.parquet" => %{ids: nil, columns: ["id", "ts"]}
            }
 
-    assert rows |> FieldIds.by_file() |> FieldIds.ids() == %{
+    assert FieldIds.ids(described) == %{
              "a.parquet" => %{"id" => 1, "attrs" => 3, "ts" => 4},
              "b.parquet" => nil
            }
+  end
+
+  test "by_file/1 answers an error for a file whose rows do not walk as one tree (T-759)" do
+    root = ["a.parquet", "duckdb_schema", 2, nil]
+    struct = ["a.parquet", "s", 1, 2]
+    child = ["a.parquet", "x", nil, nil]
+    leaf = ["a.parquet", "id", nil, 1]
+
+    assert {:ok, %{"a.parquet" => %{columns: ["id", "s"]}}} =
+             FieldIds.by_file([root, leaf, struct, child])
+
+    unreadable = {:error, {:unreadable_schema, "a.parquet"}}
+    assert FieldIds.by_file([struct, child, root, leaf]) == unreadable
+    assert FieldIds.by_file([root, leaf, struct]) == unreadable
+    assert FieldIds.by_file([root, leaf, child, struct]) == unreadable
   end
 end
