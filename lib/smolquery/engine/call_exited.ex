@@ -26,6 +26,16 @@ defmodule Smolquery.Engine.CallExited do
   def new({reason, {GenServer, :call, _args}}), do: %__MODULE__{reason: reason}
   def new(reason), do: %__MODULE__{reason: reason}
 
+  @doc """
+  Runs `call`, answering an exit it raises as `{:error, %CallExited{}}`.
+  """
+  @spec catching((-> result)) :: result | {:error, t()} when result: term()
+  def catching(call) do
+    call.()
+  catch
+    :exit, reason -> {:error, new(reason)}
+  end
+
   @impl true
   def message(%__MODULE__{reason: reason}) do
     "engine call exited before replying: #{inspect(reason)}"

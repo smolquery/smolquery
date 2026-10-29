@@ -11,18 +11,20 @@ defmodule Smolquery.QueryService.ShardDescribe do
   is on (duckdb/duckdb#24273): a shard of 577 files took 30 s to describe
   where it took 1.5 s. With it off the read runs on every thread of the
   engine, as it did on 1.5. 120 files at 25 ms a request took 6.3 s with it
-  on, and 0.8 s with it off at 8 threads, 0.22 s at 32. That is as fast as
-  cutting the list across helper connections, as
-  `Smolquery.Engine.ParallelDescribe` does (T-719), without the helpers or
-  the dirty I/O scheduler each one held.
+  on, and 0.8 s with it off at 8 threads, 0.22 s at 32. The fan-out it
+  replaces, `Smolquery.Engine.ParallelDescribe` (T-719), read on at most 4
+  to 6 connections and took 1.6 s at any thread count. Cutting the list as
+  well as turning the setting off bought at most 15%, and cost a helper
+  connection and a dirty I/O scheduler a lane.
 
   The setting belongs to the database, not the connection, and the engine
   runs the job's own SQL next, whose unordered results it would reorder. So
   the describe reads the setting, turns it off only if it was on, and puts
-  it back before it answers, whether the read succeeded or not. A shard
-  locks its engine down after the describe, so none of the job's SQL runs
-  in between. A setting that cannot be put back is the describe's error,
-  never a scan with it off. A call that exits answers a
+  it back before it answers, whether the read succeeded, failed or exited.
+  A shard locks its engine down after the describe, so none of the job's
+  SQL runs in between. A setting that cannot be put back is the describe's
+  error when the read succeeded, never a scan with it off; when the read
+  failed, its own error is the answer. A call that exits answers a
   `Smolquery.Engine.CallExited`.
   """
 
@@ -35,36 +37,49 @@ defmodule Smolquery.QueryService.ShardDescribe do
 
   @doc """
   The per-file descriptions of `urls`, read through `engine`'s connection, as
-  `FieldIds.by_file/1` answers them.
+  `FieldIds.read/3` answers them.
   """
   @spec files(engine(), [String.t()]) ::
           {:ok, %{String.t() => FieldIds.description()}} | {:error, term()}
   def files(_engine, []), do: {:ok, %{}}
 
   def files(%{connection: connection}, urls),
-    do: catching_exit(fn -> described(connection, urls) end)
+    do: CallExited.catching(fn -> described(connection, urls) end)
 
   defp described(connection, urls) do
     with {:ok, preserved} <- insertion_order(connection),
-         do: unordered(connection, preserved, fn -> describe(connection, urls) end)
+         do:
+           unordered(connection, preserved, fn -> FieldIds.read(connection, urls, :infinity) end)
   end
 
   defp insertion_order(connection) do
     sql = "SELECT current_setting('preserve_insertion_order')"
 
-    with {:ok, %Result{rows: [[preserved]]}} <- Connection.query(connection, sql, [], :infinity),
-         do: {:ok, preserved}
+    case Connection.query(connection, sql, [], :infinity) do
+      {:ok, %Result{rows: [[preserved]]}} when is_boolean(preserved) ->
+        {:ok, preserved}
+
+      {:ok, %Result{rows: rows}} ->
+        {:error, {:unexpected_setting, :preserve_insertion_order, rows}}
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   defp unordered(_connection, false, read), do: read.()
 
   defp unordered(connection, true, read) do
     with :ok <- insertion_order(connection, false) do
-      described = read.()
+      described = CallExited.catching(read)
 
-      with :ok <- insertion_order(connection, true), do: described
+      restored(described, CallExited.catching(fn -> insertion_order(connection, true) end))
     end
   end
+
+  defp restored({:ok, _described} = described, :ok), do: described
+  defp restored({:ok, _described}, {:error, _reason} = error), do: error
+  defp restored({:error, _reason} = error, _restore), do: error
 
   defp insertion_order(connection, preserved) do
     sql = "SET preserve_insertion_order = #{preserved}"
@@ -73,17 +88,5 @@ defmodule Smolquery.QueryService.ShardDescribe do
       {:ok, _result} -> :ok
       {:error, _reason} = error -> error
     end
-  end
-
-  defp describe(connection, urls) do
-    with {:ok, result} <-
-           Connection.query(connection, FieldIds.sql(length(urls)), urls, :infinity),
-         do: {:ok, FieldIds.by_file(result.rows)}
-  end
-
-  defp catching_exit(call) do
-    call.()
-  catch
-    :exit, reason -> {:error, CallExited.new(reason)}
   end
 end
