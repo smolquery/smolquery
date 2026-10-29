@@ -385,6 +385,9 @@ When you tune the cadence, check which trigger ends the commit:
 1. Divide `flush_max_bytes` by the offered bytes per second.
 2. Compare the result against `flush_interval_ms`.
 
+How many hot files a table holds, and what that costs a query, is in
+[deployment.md](deployment.md#tuning-the-hot-tier).
+
 `ring:` is the static fallback only. With `CATALOG_DATABASE_URL` set, ownership
 instead tracks the nodes that are alive and host this instance, via `:pg`
 (`Smolquery.Cluster.PgGroup`). The config value only matters again if
