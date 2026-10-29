@@ -1,6 +1,7 @@
 defmodule Smolquery.QueryService.ShardDescribeTest do
   use ExUnit.Case, async: false
 
+  alias Smolquery.Engine.CallExited
   alias Smolquery.Engine.Connection
   alias Smolquery.QueryService.JobEngine
   alias Smolquery.QueryService.ShardDescribe
@@ -110,12 +111,12 @@ defmodule Smolquery.QueryService.ShardDescribeTest do
       %{engine: engine, urls: urls, counters: counters}
     end
 
-    test "reads several files at once and answers what one statement does (T-719)", %{
+    test "reads several files at once and answers what one statement does (T-719, T-759)", %{
       engine: engine,
       urls: urls,
       counters: counters
     } do
-      assert {:ok, described} = ShardDescribe.files(engine, urls, [])
+      assert {:ok, described} = ShardDescribe.files(engine, urls)
       assert :atomics.get(counters, 2) > 1
 
       {:ok, one} = Connection.query(engine.connection, FieldIds.sql(length(urls)), urls)
@@ -125,61 +126,65 @@ defmodule Smolquery.QueryService.ShardDescribeTest do
 
     @tag threads: 2
     test "keeps to the engine's thread count", %{engine: engine, urls: urls, counters: counters} do
-      assert {:ok, %{} = described} = ShardDescribe.files(engine, urls, [])
+      assert {:ok, %{} = described} = ShardDescribe.files(engine, urls)
       assert map_size(described) == 16
       assert :atomics.get(counters, 2) == 2
     end
 
-    test "every helper starts with the engine's bootstrap and the job's statements", %{
+    test "puts preserve_insertion_order back on after a describe", %{engine: engine, urls: urls} do
+      assert {:ok, _described} = ShardDescribe.files(engine, urls)
+      assert insertion_order(engine) == true
+    end
+
+    test "puts preserve_insertion_order back on after a describe that fails", %{
       engine: engine,
       urls: urls
     } do
-      assert {:error, reason} = ShardDescribe.files(engine, urls, ["SET no_such_setting = 1"])
-      assert inspect(reason) =~ "no_such_setting"
+      assert {:error, %Adbc.Error{}} = ShardDescribe.files(engine, [missing(urls) | urls])
+      assert insertion_order(engine) == true
     end
 
-    test "one chunk reads on the engine's own connection, and no files is nothing", %{
+    test "leaves preserve_insertion_order off when it was off", %{
       engine: engine,
-      urls: [url | _rest]
+      urls: urls,
+      counters: counters
     } do
-      assert {:ok, %{^url => %{columns: ["id", "name"]}}} =
-               ShardDescribe.files(engine, [url], ["SET no_such_setting = 1"])
+      {:ok, _result} = Connection.query(engine.connection, "SET preserve_insertion_order = false")
 
-      assert ShardDescribe.files(engine, [], []) == {:ok, %{}}
+      assert {:ok, %{} = described} = ShardDescribe.files(engine, urls)
+      assert map_size(described) == 16
+      assert :atomics.get(counters, 2) > 1
+      assert insertion_order(engine) == false
     end
 
-    test "a file the engine's own chunk cannot read is the batch's error, as an Adbc.Error", %{
-      engine: engine,
-      urls: urls
-    } do
-      assert {:error, %Adbc.Error{}} = ShardDescribe.files(engine, [missing(urls) | urls], [])
+    test "one file reads, and no files is nothing", %{engine: engine, urls: [url | _rest]} do
+      assert {:ok, %{^url => %{columns: ["id", "name"]}}} = ShardDescribe.files(engine, [url])
+      assert ShardDescribe.files(engine, []) == {:ok, %{}}
     end
 
-    test "a file a helper cannot read is the batch's error, as an Adbc.Error", %{
-      engine: engine,
-      urls: urls
-    } do
-      assert {:error, %Adbc.Error{}} = ShardDescribe.files(engine, urls ++ [missing(urls)], [])
-    end
-
-    @tag delay_ms: 300
-    test "an error waits for every helper, so no read is left running when it returns", %{
+    test "a file the engine cannot read is the batch's error, as an Adbc.Error", %{
       engine: engine,
       urls: urls
     } do
-      assert {:error, %Adbc.Error{}} = ShardDescribe.files(engine, [missing(urls) | urls], [])
-      assert nif_readers() == 0
+      assert {:error, %Adbc.Error{}} = ShardDescribe.files(engine, urls ++ [missing(urls)])
     end
+  end
+
+  test "a connection that is gone answers a CallExited" do
+    gone = spawn(fn -> :ok end)
+    ref = Process.monitor(gone)
+    assert_receive {:DOWN, ^ref, :process, ^gone, _reason}
+
+    assert {:error, %CallExited{}} =
+             ShardDescribe.files(%{connection: gone}, ["http://x/a.parquet"])
+  end
+
+  defp insertion_order(engine) do
+    {:ok, %{rows: [[preserved]]}} =
+      Connection.query(engine.connection, "SELECT current_setting('preserve_insertion_order')")
+
+    preserved
   end
 
   defp missing(urls), do: String.replace(hd(urls), ~r/[^\/]+$/, "missing.parquet")
-
-  defp nif_readers do
-    Enum.count(Process.list(), fn pid ->
-      match?(
-        {:current_function, {Adbc.Nif, _function, _arity}},
-        Process.info(pid, :current_function)
-      )
-    end)
-  end
 end

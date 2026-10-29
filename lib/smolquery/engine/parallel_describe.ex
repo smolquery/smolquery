@@ -4,9 +4,12 @@ defmodule Smolquery.Engine.ParallelDescribe do
   (`Smolquery.Segments.FieldIds`), several files at a time (T-719, T-723).
 
   DuckDB 1.5 read a `parquet_schema([...])` list on every thread. DuckDB 2.0
-  reads it one file at a time, and so does a `UNION ALL` of several lists:
-  one footer read per file, each an S3 round trip, so 577 files took 30 s to
-  describe where they took 1.5 s.
+  reads it one file at a time while `preserve_insertion_order` is on
+  (duckdb/duckdb#24273), and so does a `UNION ALL` of several lists: one
+  footer read per file, each an S3 round trip, so 577 files took 30 s to
+  describe where they took 1.5 s. A shard turns the setting off for its
+  describe instead, and reads on its own connection
+  (`Smolquery.QueryService.ShardDescribe`, T-759).
 
   So the files are cut into as many chunks as the engine has threads, at
   most `max_chunks/1`, and every chunk is read by its own `parquet_schema` at
