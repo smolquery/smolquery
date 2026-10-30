@@ -101,6 +101,21 @@ defmodule Smolquery.StorageService.RuntimeTest do
       end
     end
 
+    test "seal_data_page_bytes is off by default, and refuses what DuckDB would not take or a value meant in megabytes (T-757)" do
+      assert Runtime.new(name: __MODULE__.DefaultDataPage).seal_data_page_bytes == nil
+
+      for bytes <- [65_536, 104_857_600] do
+        assert Runtime.new(name: __MODULE__.DataPage, seal_data_page_bytes: bytes).seal_data_page_bytes ==
+                 bytes
+      end
+
+      for bytes <- [0, 1, 65_535, 104_857_601, "1MB"] do
+        assert_raise ArgumentError, ~r/unsupported seal_data_page_bytes/, fn ->
+          Runtime.new(name: __MODULE__.BadDataPage, seal_data_page_bytes: bytes)
+        end
+      end
+    end
+
     test "refuses a malformed compact_min_inputs at boot, naming the right key" do
       for min <- [nil, 0, "2"] do
         assert_raise ArgumentError, ~r/unsupported compact_min_inputs/, fn ->

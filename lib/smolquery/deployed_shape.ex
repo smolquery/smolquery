@@ -111,6 +111,7 @@ defmodule Smolquery.DeployedShape do
       compression: runtime.compression,
       seal_row_group_size: runtime.seal_row_group_size,
       seal_row_group_bytes: runtime.seal_row_group_bytes || :unset,
+      seal_data_page_bytes: runtime.seal_data_page_bytes || :unset,
       max_concurrent_seals: runtime.max_concurrent_seals,
       seal_backoff_base_ms: runtime.seal_backoff_base_ms,
       seal_backoff_max_ms: runtime.seal_backoff_max_ms,

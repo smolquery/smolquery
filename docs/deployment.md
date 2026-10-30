@@ -271,6 +271,16 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### Unreleased: an opt-in cap on sealed Parquet page size (T-757)
+
+**TL;DR.** `SMOLQUERY_SEAL_DATA_PAGE_BYTES` caps the Parquet data pages every seal and compaction writes. On DuckDB 2.0, 1 MiB pages make a read of a long text or JSON column need a small fraction of the memory it did. It is off by default, because small pages make an out-of-memory compaction likelier to hang. Nothing to change on upgrade.
+
+- **Why.** DuckDB 2.0 reads each Parquet page with a buffer per thread, so a 100 MB page of long JSON costs every thread that much (T-727, duckdb/duckdb#28082). At 32 threads with `SMOLQUERY_SEAL_DATA_PAGE_BYTES=1048576`, a JSON column that needed 12 GB read in 256 MB, and a realistic log table in 1M-row groups read in 512 MB instead of 3 GB.
+- **What it keeps.** Row groups keep `SMOLQUERY_SEAL_ROW_GROUP_SIZE` rows, so a sealed-tier scan makes as many `httpfs` requests as before (T-280). Files came out the same size, and reads ran 15 to 25% faster.
+- **Why it is off.** A compaction's write needs about 10% more memory. And in DuckDB 2.0.0 a `COPY` that runs out of memory can deadlock instead of failing (T-765). At 2 threads, 4 of 60 such writes hung with DuckDB's own pages, 9 of 60 with 8 MiB pages and 33 of 60 with 1 MiB pages. The hung write never returns.
+- **When to set it.** On a node whose reads of long text run out of memory and whose compactions run well below `SMOLQUERY_STORAGE_COMPACT_MEMORY_LIMIT`. `1048576` is the value measured.
+- **New data only.** Compaction never revisits a healthy-sized segment, so files already written keep their pages.
+
 ### Unreleased: a shard describes its files on every thread again (T-759)
 
 **TL;DR.** A query shard reads its sealed files' column ids in one `parquet_schema`, with `preserve_insertion_order` off for that read only. 120 files took 1.6 s through the old fan-out and now take 0.8 s at 8 threads, 0.22 s at 32. Nothing to change on upgrade.
