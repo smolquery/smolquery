@@ -20,6 +20,7 @@ defmodule Smolquery.StorageService.Runtime do
         compression: :zstd,
         seal_row_group_size: 1_048_576,
         seal_row_group_bytes: nil,
+        seal_data_page_bytes: nil,
         target_segment_bytes: 268_435_456,
         max_concurrent_seals: 2,
         gc_interval_ms: 300_000,
@@ -286,17 +287,35 @@ defmodule Smolquery.StorageService.Runtime do
   every seal, compaction and merge scratch `COPY`, so a row group closes at
   that many bytes even before `seal_row_group_size` rows (T-727). DuckDB 2.0's
   Parquet reader holds a buffer per thread for each data page it decodes,
-  rounded up to a power of two, and the writer has no page-size option, so
-  what a read costs depends on the pages the writer chose. On a long,
-  compressible JSON column, files with 102k-row groups (a deployment that set
-  `seal_row_group_size` to 100_000) needed about 11 GB at 32 threads, where
-  1.5.3 needed 6 to 8; 400k- and 1M-row groups of the same data read within
-  8 GB; a 32 MB cap read it in 2 GB. The cap applies to every table, so on a
-  wide table it also shrinks the row groups `seal_row_group_size` keeps large
-  for `httpfs`, which is why it is off unless a deployment sets it. It must be
-  at least 1 MiB, so a value meant in megabytes fails at boot. It applies to
-  newly written segments only: compaction never revisits a healthy-sized
-  segment, so files already written keep their pages.
+  rounded up to a power of two, so what a read costs depends on the pages the
+  writer chose. On a long, compressible JSON column, files with 102k-row
+  groups (a deployment that set `seal_row_group_size` to 100_000) needed
+  about 11 GB at 32 threads, where 1.5.3 needed 6 to 8; 400k- and 1M-row
+  groups of the same data read within 8 GB; a 32 MB cap read it in 2 GB. The
+  cap applies to every table, so on a wide table it also shrinks the row
+  groups `seal_row_group_size` keeps large for `httpfs`, which is why it is
+  off unless a deployment sets it. `seal_data_page_bytes` is the better
+  lever. It must be at least 1 MiB, so a value meant in megabytes fails at
+  boot.
+
+  `seal_data_page_bytes` (default `nil`) passes `DATA_PAGE_SIZE_LIMIT` to the
+  same `COPY`s, so a column chunk is cut into pages of about that many bytes
+  while its row group keeps `seal_row_group_size` rows (T-757). DuckDB's own
+  default is 100 MB a page. On DuckDB 2.0.0 at 32 threads, the JSON column
+  above, in 100k-row groups, read in 256 MB with 1 MiB pages where it needed
+  12 GB; a realistic log table in 1M-row groups read in 512 MB where it
+  needed 3 GB. The reads ran 15 to 25% faster and the files came out the
+  same size. The cost is the write, which is why it is off unless a
+  deployment sets it. A 6M-row rewrite needed about 10% more memory at 2
+  and 4 threads, at any page cap from 1 to 32 MiB. And a DuckDB 2.0.0
+  `COPY` that runs out of memory can deadlock instead of failing (T-765),
+  which small pages make likelier: at 2 threads, 4 of 60 such writes hung
+  with DuckDB's pages, 9 of 60 with 8 MiB pages and 33 of 60 with 1 MiB
+  pages. It must be between 64 KiB and 100 MB (DuckDB's ceiling), so a
+  value meant in megabytes fails at boot.
+
+  Both apply to newly written segments only: compaction never revisits a
+  healthy-sized segment, so files already written keep their pages.
 
   `engine_extensions` are loaded into this service's own engine. `httpfs` is not
   optional in a real deployment — the merge reads micro-segments over HTTP, and an
@@ -335,6 +354,7 @@ defmodule Smolquery.StorageService.Runtime do
     compression: :zstd,
     seal_row_group_size: 1_048_576,
     seal_row_group_bytes: nil,
+    seal_data_page_bytes: nil,
     target_segment_bytes: 268_435_456,
     max_concurrent_seals: 2,
     seal_backoff_base_ms: 30_000,
@@ -385,6 +405,7 @@ defmodule Smolquery.StorageService.Runtime do
           compression: atom(),
           seal_row_group_size: pos_integer(),
           seal_row_group_bytes: pos_integer() | nil,
+          seal_data_page_bytes: pos_integer() | nil,
           target_segment_bytes: pos_integer(),
           max_concurrent_seals: pos_integer(),
           seal_backoff_base_ms: non_neg_integer(),
@@ -430,6 +451,7 @@ defmodule Smolquery.StorageService.Runtime do
     :compression,
     :seal_row_group_size,
     :seal_row_group_bytes,
+    :seal_data_page_bytes,
     :target_segment_bytes,
     :max_concurrent_seals,
     :seal_backoff_base_ms,
@@ -470,6 +492,8 @@ defmodule Smolquery.StorageService.Runtime do
 
   @min_row_group_bytes 1_048_576
 
+  @data_page_bytes 65_536..104_857_600//1
+
   @default_dir "priv/data/sealed"
 
   @doc """
@@ -505,6 +529,7 @@ defmodule Smolquery.StorageService.Runtime do
     |> validate_compression()
     |> validate_seal_row_group_size()
     |> validate_seal_row_group_bytes()
+    |> validate_seal_data_page_bytes()
     |> validate_compact_bucket_ms()
     |> validate_compact_target()
     |> validate_compact_inputs()
@@ -874,6 +899,19 @@ defmodule Smolquery.StorageService.Runtime do
     raise ArgumentError,
           "unsupported seal_row_group_bytes: #{inspect(bytes)} " <>
             "(expected nil or an integer of at least #{@min_row_group_bytes} bytes)"
+  end
+
+  defp validate_seal_data_page_bytes(%__MODULE__{seal_data_page_bytes: nil} = runtime),
+    do: runtime
+
+  defp validate_seal_data_page_bytes(%__MODULE__{seal_data_page_bytes: bytes} = runtime)
+       when is_integer(bytes) and bytes in @data_page_bytes,
+       do: runtime
+
+  defp validate_seal_data_page_bytes(%__MODULE__{seal_data_page_bytes: bytes}) do
+    raise ArgumentError,
+          "unsupported seal_data_page_bytes: #{inspect(bytes)} " <>
+            "(expected nil or an integer from #{@data_page_bytes.first} to #{@data_page_bytes.last} bytes)"
   end
 
   defp validate_compact_bucket_ms(%__MODULE__{compact_bucket_ms: ms} = runtime)

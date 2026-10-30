@@ -144,6 +144,21 @@ defmodule Smolquery.StorageService.MergeTest do
     |> hd()
   end
 
+  defp data_page_count(runtime, segment, column) do
+    Runtime.engine(runtime.name)
+    |> Engine.query!(
+      """
+      SELECT sum(stat.count)::BIGINT FROM (
+        SELECT unnest(encoding_stats) AS stat FROM parquet_metadata($1) WHERE path_in_schema = $2
+      ) WHERE stat.page_type::VARCHAR = 'DATA_PAGE'
+      """,
+      [Store.location(runtime.store, segment.key), column]
+    )
+    |> Map.fetch!(:rows)
+    |> hd()
+    |> hd()
+  end
+
   defp seal_many(buffer, table, batches) do
     Enum.map(batches, fn range ->
       {:ok, ack} = Client.write_batch(buffer, table, batch(range))
@@ -187,6 +202,32 @@ defmodule Smolquery.StorageService.MergeTest do
       end
 
     assert [1, capped] = groups
+    assert capped > 1
+  end
+
+  test "a data page cap cuts a column into pages and keeps the row group (T-757)", %{
+    buffer: buffer,
+    runtime: runtime
+  } do
+    {:ok, prefix} = Store.prefix(@table)
+    capped_runtime = %{runtime | seal_data_page_bytes: 16_384}
+
+    pages =
+      for {merge_runtime, first, id} <- [
+            {runtime, 1, "01KYWPEEGAM8FQVQS5S2QF27B1"},
+            {capped_runtime, 20_001, "01KYWPEEGAM8FQVQS5S2QF27B2"}
+          ] do
+        ids =
+          seal_many(buffer, @table, [first..(first + 9_999), (first + 10_000)..(first + 19_999)])
+
+        {:ok, key} = Store.key(prefix, id)
+
+        assert {:ok, segment} = merge(merge_runtime, @table, claim(ids, [key]))
+        assert row_group_count(runtime, segment) == 1
+        data_page_count(runtime, segment, "id")
+      end
+
+    assert [1, capped] = pages
     assert capped > 1
   end
 

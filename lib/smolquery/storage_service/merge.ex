@@ -194,7 +194,12 @@ defmodule Smolquery.StorageService.Merge do
   runs the other way, so the gate is gone. The value is configured once at
   boot as `seal_row_group_size` on `Smolquery.StorageService.Runtime`, beside
   an optional byte cap, `seal_row_group_bytes`, that closes a group of long
-  text early so DuckDB 2.0 can read its pages in bounded memory (T-727).
+  text early (T-727), and an optional page cap, `seal_data_page_bytes`, that
+  cuts each column chunk into pages of that size (T-757). DuckDB 2.0 reads a
+  page with a buffer per thread, so small pages keep a read of long text in
+  bounded memory without shrinking the row group. The cap is off by default:
+  small pages make an out-of-memory `COPY` in DuckDB 2.0.0 likelier to hang
+  than to fail (T-765).
 
   ## A large span merge sorts window by window, so its memory is bounded (T-607)
 
@@ -847,14 +852,20 @@ defmodule Smolquery.StorageService.Merge do
 
     "FORMAT PARQUET, COMPRESSION #{codec(runtime.compression)}, " <>
       "ROW_GROUP_SIZE #{runtime.seal_row_group_size}" <>
-      "#{row_group_bytes(runtime.seal_row_group_bytes)}#{field_ids}"
+      "#{row_group_bytes(runtime.seal_row_group_bytes)}#{data_page_bytes(runtime.seal_data_page_bytes)}#{field_ids}"
   end
 
   defp scratch_options(runtime),
-    do: "FORMAT PARQUET, COMPRESSION ZSTD" <> row_group_bytes(runtime.seal_row_group_bytes)
+    do:
+      "FORMAT PARQUET, COMPRESSION ZSTD" <>
+        row_group_bytes(runtime.seal_row_group_bytes) <>
+        data_page_bytes(runtime.seal_data_page_bytes)
 
   defp row_group_bytes(nil), do: ""
   defp row_group_bytes(bytes), do: ", ROW_GROUP_SIZE_BYTES #{bytes}"
+
+  defp data_page_bytes(nil), do: ""
+  defp data_page_bytes(bytes), do: ", DATA_PAGE_SIZE_LIMIT #{bytes}"
 
   defp order_by(%Schema{} = schema) do
     case Schema.clustering_columns(schema) do

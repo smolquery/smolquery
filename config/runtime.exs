@@ -543,6 +543,21 @@ if bytes = System.get_env("SMOLQUERY_SEAL_ROW_GROUP_BYTES") do
       )
 end
 
+# T-757: an optional `DATA_PAGE_SIZE_LIMIT` on the same `COPY`s. Small pages
+# bound what DuckDB 2.0 holds per thread to read a long text column, and keep
+# the row groups large. Off by default while small pages make an
+# out-of-memory `COPY` likelier to hang (T-765).
+if bytes = System.get_env("SMOLQUERY_SEAL_DATA_PAGE_BYTES") do
+  config :smolquery, Smolquery.StorageService,
+    seal_data_page_bytes:
+      Smolquery.RuntimeConfig.integer_in_range!(
+        "SMOLQUERY_SEAL_DATA_PAGE_BYTES",
+        bytes,
+        65_536,
+        104_857_600
+      )
+end
+
 # T-260: bytes alone do not bound a compaction group's merge cost — on
 # highly compressible data the decompressed row count diverges from the
 # compressed bytes by ~100x, and merge cost scales with rows.
