@@ -36,9 +36,13 @@ defmodule Smolquery.QueryService.Decomposer do
   orders its histogram (`ORDER BY toStartOfInterval(...)`) and a top-k chart
   its groups (`ORDER BY count() DESC`). The final step orders by the output
   column that item became, which is the same order. A constant is not such
-  an expression: `ORDER BY 2` is a position to the engine, and would match
-  a select item that is the literal `2`. A select
-  item must be a supported aggregate or match a group expression. Table
+  an expression: `ORDER BY 2` is a position to the engine, and must not
+  match a select item that is the literal `2`. It is read as what the
+  engine reads it as, the output column at that position, when it is an
+  integer between 1 and the number of select items and that column's name
+  is no other's; a position out of range, a decimal or a string constant
+  refuses. A select item must be a supported aggregate or match a group
+  expression. Table
   columns prefixed `__pq_` would collide with the generated aliases, so
   they refuse too. Volatile functions — `now()`, `random()`, and their
   kin — refuse as well: each worker would bind them on its own clock or
@@ -1485,11 +1489,22 @@ defmodule Smolquery.QueryService.Decomposer do
           do: {:ok, ordered(name, order)},
           else: {:error, {:order_by_unknown_column, name}}
 
-      %{"class" => "CONSTANT"} ->
-        {:error, :order_by_position}
+      %{"class" => "CONSTANT"} = constant ->
+        ordered_by_position(constant, order, {names, items})
 
       expression ->
         ordered_by_item(Ast.shape(expression), order, {names, items})
+    end
+  end
+
+  defp ordered_by_position(constant, order, {names, items}) do
+    with {:ok, position} <- Ast.integer(constant),
+         true <- position in 1..length(items)//1 and length(items) == length(names),
+         name = Enum.at(names, position - 1),
+         1 <- Enum.count(names, &(&1 == name)) do
+      {:ok, ordered(name, order)}
+    else
+      _no_such_position_or_an_ambiguous_name -> {:error, :order_by_position}
     end
   end
 
@@ -1509,8 +1524,8 @@ defmodule Smolquery.QueryService.Decomposer do
   defp direction(%{"type" => "DESCENDING"}), do: "DESC"
   defp direction(_default), do: ""
 
-  defp nulls(%{"null_order" => "NULLS_FIRST"}), do: "NULLS FIRST"
-  defp nulls(%{"null_order" => "NULLS_LAST"}), do: "NULLS LAST"
+  defp nulls(%{"null_order" => "NULLS FIRST"}), do: "NULLS FIRST"
+  defp nulls(%{"null_order" => "NULLS LAST"}), do: "NULLS LAST"
   defp nulls(_default), do: ""
 
   defp quoted(name), do: "\"" <> String.replace(name, "\"", "\"\"") <> "\""

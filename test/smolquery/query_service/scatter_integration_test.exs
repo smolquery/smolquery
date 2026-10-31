@@ -347,6 +347,20 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert_received {:scatter, _measurements, _meta}
   end
 
+  test "a positional ORDER BY scatters and answers exactly", %{
+    control: control,
+    distributed: distributed
+  } do
+    both(
+      control,
+      distributed,
+      "SELECT name, count(*), sum(id) FROM analytics.events " <>
+        "GROUP BY name ORDER BY 2 DESC, 1 LIMIT 2"
+    )
+
+    assert_received {:scatter, _measurements, _meta}
+  end
+
   test "aggregates that merge through a value scatter and answer exactly (T-539)", %{
     control: control,
     distributed: distributed
