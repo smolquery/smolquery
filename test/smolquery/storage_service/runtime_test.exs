@@ -101,7 +101,7 @@ defmodule Smolquery.StorageService.RuntimeTest do
       end
     end
 
-    test "seal_data_page_bytes is off by default, and refuses what DuckDB would not take or a value meant in megabytes (T-757)" do
+    test "seal_data_page_bytes is off by default, and refuses values over DuckDB's 100 MB ceiling or under our 64 KiB floor (T-757)" do
       assert Runtime.new(name: __MODULE__.DefaultDataPage).seal_data_page_bytes == nil
 
       for bytes <- [65_536, 104_857_600] do
