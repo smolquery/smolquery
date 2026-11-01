@@ -294,9 +294,9 @@ defmodule Smolquery.StorageService.Runtime do
   groups of the same data read within 8 GB; a 32 MB cap read it in 2 GB. The
   cap applies to every table, so on a wide table it also shrinks the row
   groups `seal_row_group_size` keeps large for `httpfs`, which is why it is
-  off unless a deployment sets it. `seal_data_page_bytes` is the better
-  lever. It must be at least 1 MiB, so a value meant in megabytes fails at
-  boot.
+  off unless a deployment sets it. It must be at least 1 MiB, so a value
+  meant in megabytes fails at boot. `seal_data_page_bytes` is the better
+  lever.
 
   `seal_data_page_bytes` (default `nil`) passes `DATA_PAGE_SIZE_LIMIT` to the
   same `COPY`s, so a column chunk is cut into pages of about that many bytes
@@ -304,15 +304,20 @@ defmodule Smolquery.StorageService.Runtime do
   default is 100 MB a page. On DuckDB 2.0.0 at 32 threads, the JSON column
   above, in 100k-row groups, read in 256 MB with 1 MiB pages where it needed
   12 GB; a realistic log table in 1M-row groups read in 512 MB where it
-  needed 3 GB. The reads ran 15 to 25% faster and the files came out the
-  same size. The cost is the write, which is why it is off unless a
-  deployment sets it. A 6M-row rewrite needed about 10% more memory at 2
-  and 4 threads, at any page cap from 1 to 32 MiB. And a DuckDB 2.0.0
-  `COPY` that runs out of memory can deadlock instead of failing (T-765),
-  which small pages make likelier: at 2 threads, 4 of 60 such writes hung
-  with DuckDB's pages, 9 of 60 with 8 MiB pages and 33 of 60 with 1 MiB
-  pages. It must be between 64 KiB and 100 MB (DuckDB's ceiling), so a
-  value meant in megabytes fails at boot.
+  needed 3 GB. The reads ran 15 to 25% faster. Realistic logs came out 1%
+  smaller, and synthetic JSON that compresses about 200x came out 13%
+  larger. The cost is the write, which is why it is off unless a deployment
+  sets it. A 6M-row rewrite needed about 10% more memory at 2 and 4
+  threads, at any page cap from 1 to 32 MiB. And a DuckDB 2.0.0 `COPY` that
+  runs out of memory can deadlock instead of failing (T-765), which small
+  pages make likelier: at 2 threads, 4 of 60 such writes hung with DuckDB's
+  pages, 9 of 60 with 8 MiB pages and 33 of 60 with 1 MiB pages. The call
+  times out, but the statement never finishes, and its engine connection
+  runs statements one at a time, so everything behind it on that connection
+  waits until the node restarts. A seal has no OOM adaptation and retries
+  the same write, which makes seals the likelier victim. It must be between
+  64 KiB (our floor) and 100 MB (DuckDB's ceiling), so a value meant in
+  megabytes fails at boot.
 
   Both apply to newly written segments only: compaction never revisits a
   healthy-sized segment, so files already written keep their pages.
