@@ -271,12 +271,13 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
-### Unreleased: a node opens its listeners after its services start (T-767)
+### Unreleased: a table change during a node's boot no longer answers 500 (T-767)
 
-**TL;DR.** The HTTP API, web UI, Postgres-wire, ClickHouse and VictoriaMetrics edges now start after the ingest, buffer, storage and query services, not before. A fresh node no longer answers `/healthz` while a service is still booting, so a `CREATE TABLE` right after the node turns healthy cannot fail with a 500. Nothing to change on upgrade.
+**TL;DR.** A node answers `/healthz` before its ingest service has finished starting. A `CREATE TABLE` in that window answered 500, after the catalog had already created the table. It now succeeds, and an insert in the same window answers 503 `UNAVAILABLE` instead of 500. Nothing to change on upgrade.
 
-- **What it fixed.** The API started first. A `CREATE TABLE` that arrived 0.4 s later found the ingest service half started and returned 500, after the catalog had already created the table. The benchmark hit this on three runs in a row.
-- **What you may notice.** `/healthz` answers a little later after a restart, once the services have started. The readiness probe retries until then, and the liveness probe waits 30 s before its first check.
+- **What it fixed.** The ingest service publishes its settings before its schema cache exists, so a request could find the service but not its cache. The benchmark hit this on three runs in a row, 0.4 s after the API started.
+- **The same gap after a crash.** When the ingest service's catalog engine restarts, its cache restarts with it. Requests in that gap get the same answers.
+- **Why not start the API last.** That was tried and dropped: a node running both the API and a buffer would keep port 4000 closed while the buffer adopts its unsealed backlog. With a long backlog, the liveness probe could restart the pod again and again.
 
 ### Unreleased: an opt-in cap on sealed Parquet page size (T-757)
 
