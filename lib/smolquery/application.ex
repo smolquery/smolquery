@@ -9,6 +9,9 @@ defmodule Smolquery.Application do
   Order within a node does not encode a dependency: services reach each other
   through client modules that tolerate a peer being absent, so a node starting
   `:storage` before `:buffer` is not a problem for either.
+  The edges are the exception: they start after every service, so a node
+  takes no outside traffic until its services have booted
+  (`Smolquery.Roles.boot_order/1`, T-767).
 
   `Smolquery.PubSub` and `Smolquery.Lifecycle` run on every node regardless
   of role: lifecycle events originate wherever the work runs (a buffer's
@@ -72,7 +75,8 @@ defmodule Smolquery.Application do
       Smolquery.Cluster.RingCache
     ] ++
       Smolquery.Burst.children() ++
-      Smolquery.Cluster.children() ++ Enum.flat_map(Roles.enabled(), &subtree/1)
+      Smolquery.Cluster.children() ++
+      Enum.flat_map(Roles.boot_order(Roles.enabled()), &subtree/1)
   end
 
   defp subtree(:api), do: [SmolqueryApi.Supervisor]

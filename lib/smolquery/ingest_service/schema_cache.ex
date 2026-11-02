@@ -49,12 +49,21 @@ defmodule Smolquery.IngestService.SchemaCache do
 
   @doc """
   Drops a table's cached schema, so the next insert reads the catalog.
+
+  A cache that has not made its table yet holds nothing to drop: the
+  service publishes its runtime before this process starts, so a caller can
+  find the one without the other (T-767).
   """
   @spec invalidate(Runtime.t(), Store.table_ref()) :: :ok
   def invalidate(%Runtime{} = runtime, table_ref) do
-    :ets.delete(Runtime.cache(runtime.name), table_ref)
+    case :ets.whereis(Runtime.cache(runtime.name)) do
+      :undefined ->
+        :ok
 
-    :ok
+      table ->
+        :ets.delete(table, table_ref)
+        :ok
+    end
   end
 
   @impl GenServer

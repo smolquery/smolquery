@@ -79,6 +79,13 @@ defmodule Smolquery.IngestService.SchemaCacheTest do
     end
   end
 
+  test "invalidation before the cache has made its table is a no-op (T-767)" do
+    name = :"ingest_cache_#{:erlang.unique_integer([:positive])}"
+    runtime = Runtime.new(name: name, catalog: StubCatalog.new(self()), buffer_name: :none)
+
+    assert SchemaCache.invalidate(runtime, @table) == :ok
+  end
+
   test "invalidation drops the entry" do
     runtime = start_cache()
 
