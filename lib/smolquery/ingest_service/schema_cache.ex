@@ -16,6 +16,14 @@ defmodule Smolquery.IngestService.SchemaCache do
   A miss reads through `Smolquery.Catalog.table_schema/2` and caches only
   success — an unknown table stays a per-request catalog answer rather than a
   cached rejection that would outlive the table's creation.
+
+  The table can be missing while the service's runtime is published: the
+  ingest supervisor publishes it before this process starts, and a restart
+  under its `rest_for_one` drops the table until the new one is made. Every
+  ETS call here treats that as the service not being up yet, so an insert
+  answers `:ingest_service_unavailable` (a 503) and an invalidation has
+  nothing to drop. A `CREATE TABLE` in that window used to answer 500 after
+  the catalog had already created the table (T-767).
   """
 
   use GenServer
@@ -33,37 +41,35 @@ defmodule Smolquery.IngestService.SchemaCache do
 
   @doc """
   The table's schema, from cache or through the catalog.
+
+  `{:error, :ingest_service_unavailable}` while the cache has no table yet.
   """
   @spec fetch(Runtime.t(), Store.table_ref()) :: {:ok, Schema.t()} | {:error, term()}
   def fetch(%Runtime{} = runtime, table_ref) do
     table = Runtime.cache(runtime.name)
 
-    case :ets.lookup(table, table_ref) do
+    case on_table(fn -> :ets.lookup(table, table_ref) end) do
       [{^table_ref, schema, expires_at}] ->
         if now() < expires_at, do: {:ok, schema}, else: read_through(runtime, table, table_ref)
 
       [] ->
         read_through(runtime, table, table_ref)
+
+      :no_table ->
+        {:error, :ingest_service_unavailable}
     end
   end
 
   @doc """
   Drops a table's cached schema, so the next insert reads the catalog.
 
-  A cache that has not made its table yet holds nothing to drop: the
-  service publishes its runtime before this process starts, so a caller can
-  find the one without the other (T-767).
+  A cache that has no table yet holds nothing to drop.
   """
   @spec invalidate(Runtime.t(), Store.table_ref()) :: :ok
   def invalidate(%Runtime{} = runtime, table_ref) do
-    case :ets.whereis(Runtime.cache(runtime.name)) do
-      :undefined ->
-        :ok
+    _deleted = on_table(fn -> :ets.delete(Runtime.cache(runtime.name), table_ref) end)
 
-      table ->
-        :ets.delete(table, table_ref)
-        :ok
-    end
+    :ok
   end
 
   @impl GenServer
@@ -100,10 +106,19 @@ defmodule Smolquery.IngestService.SchemaCache do
 
   defp read_through(runtime, table, table_ref) do
     with {:ok, schema} <- Catalog.table_schema(runtime.catalog, table_ref) do
-      :ets.insert(table, {table_ref, schema, now() + runtime.schema_cache_ttl_ms})
+      _inserted =
+        on_table(fn ->
+          :ets.insert(table, {table_ref, schema, now() + runtime.schema_cache_ttl_ms})
+        end)
 
       {:ok, schema}
     end
+  end
+
+  defp on_table(call) do
+    call.()
+  rescue
+    ArgumentError -> :no_table
   end
 
   defp now, do: System.monotonic_time(:millisecond)

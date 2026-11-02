@@ -37,7 +37,6 @@ defmodule Smolquery.Roles do
           | :victoriametrics
 
   @all [:api, :ingest, :buffer, :storage, :query, :web, :pg, :clickhouse, :victoriametrics]
-  @edges [:api, :web, :pg, :clickhouse, :victoriametrics]
   @names Map.new(@all, &{Atom.to_string(&1), &1})
 
   @doc """
@@ -66,22 +65,6 @@ defmodule Smolquery.Roles do
   """
   @spec enabled?(t()) :: boolean()
   def enabled?(role), do: role in enabled()
-
-  @doc """
-  Orders `roles` the way a node starts them: the services first, then the
-  edges that take outside traffic (`:api`, `:web`, `:pg`, `:clickhouse`,
-  `:victoriametrics`). Each keeps its pipeline order within its group.
-
-  An edge that listened first would answer `/healthz` and route requests
-  into a service still booting: a `CREATE TABLE` 0.4 s after the endpoint
-  started found the ingest service's runtime published but its schema
-  cache not yet made, and failed with a 500 (T-767).
-
-      iex> Smolquery.Roles.boot_order([:api, :ingest, :query, :pg])
-      [:ingest, :query, :api, :pg]
-  """
-  @spec boot_order([t()]) :: [t()]
-  def boot_order(roles), do: Enum.sort_by(roles, &(&1 in @edges))
 
   @doc """
   Parses a `SMOLQUERY_ROLES` value into a role list.

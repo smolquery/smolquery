@@ -79,11 +79,25 @@ defmodule Smolquery.IngestService.SchemaCacheTest do
     end
   end
 
-  test "invalidation before the cache has made its table is a no-op (T-767)" do
+  test "before the cache has made its table, a fetch is unavailable and an invalidation a no-op (T-767)" do
     name = :"ingest_cache_#{:erlang.unique_integer([:positive])}"
     runtime = Runtime.new(name: name, catalog: StubCatalog.new(self()), buffer_name: :none)
 
+    assert SchemaCache.fetch(runtime, @table) == {:error, :ingest_service_unavailable}
     assert SchemaCache.invalidate(runtime, @table) == :ok
+    refute_received {:called, :table_schema, _args}
+  end
+
+  test "while the cache restarts, a fetch is unavailable and an invalidation a no-op (T-767)" do
+    runtime = start_cache()
+    {:ok, _schema} = SchemaCache.fetch(runtime, @table)
+    assert_received {:called, :table_schema, [@table]}
+
+    :ok = stop_supervised(SchemaCache)
+
+    assert SchemaCache.fetch(runtime, @table) == {:error, :ingest_service_unavailable}
+    assert SchemaCache.invalidate(runtime, @table) == :ok
+    refute_received {:called, :table_schema, _args}
   end
 
   test "invalidation drops the entry" do
