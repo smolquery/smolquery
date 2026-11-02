@@ -271,6 +271,13 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### Unreleased: a node opens its listeners after its services start (T-767)
+
+**TL;DR.** The HTTP API, web UI, Postgres-wire, ClickHouse and VictoriaMetrics edges now start after the ingest, buffer, storage and query services, not before. A fresh node no longer answers `/healthz` while a service is still booting, so a `CREATE TABLE` right after the node turns healthy cannot fail with a 500. Nothing to change on upgrade.
+
+- **What it fixed.** The API started first. A `CREATE TABLE` that arrived 0.4 s later found the ingest service half started and returned 500, after the catalog had already created the table. The benchmark hit this on three runs in a row.
+- **What you may notice.** `/healthz` answers a little later after a restart, once the services have started. The readiness probe retries until then, and the liveness probe waits 30 s before its first check.
+
 ### Unreleased: an opt-in cap on sealed Parquet page size (T-757)
 
 **TL;DR.** `SMOLQUERY_SEAL_DATA_PAGE_BYTES` caps the Parquet data pages every seal and compaction writes. On DuckDB 2.0, 1 MiB pages make a read of a long text or JSON column need a small fraction of the memory it did. It is off by default, because small pages make an out-of-memory compaction likelier to hang. Nothing to change on upgrade.

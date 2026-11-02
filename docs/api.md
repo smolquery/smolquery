@@ -29,7 +29,7 @@ curl -H "$auth" -H "$json" -d '{"query": "SELECT count(*) AS n FROM analytics.ev
 
 | route | |
 |---|---|
-| `GET /healthz` | Liveness check. Unauthenticated. |
+| `GET /healthz` | Liveness check. Unauthenticated. A node answers it only once every service it runs has started (T-767). |
 | `GET /v1/docs.json` | This API described as JSON, for agents (`SmolqueryApi.Docs`). Unauthenticated. The web UI serves the same document on its own host, behind its basic auth. |
 | `GET /metrics` | Prometheus text. The *internal* secret (`x-smolquery-internal`) gates this route, not the API key. Metrics are for operators, not for tenants. Every node also serves this route on its own metrics listener (`SMOLQUERY_METRICS_PORT`, default 4003). Thus a node without the `:api` role is also scrapable. |
 | `GET /v1/datasets` | List the datasets. |

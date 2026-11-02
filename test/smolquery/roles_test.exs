@@ -22,6 +22,28 @@ defmodule Smolquery.RolesTest do
     end
   end
 
+  describe "boot_order/1" do
+    test "starts every service before any edge, each group in pipeline order (T-767)" do
+      assert Roles.boot_order(Roles.all()) == [
+               :ingest,
+               :buffer,
+               :storage,
+               :query,
+               :api,
+               :web,
+               :pg,
+               :clickhouse,
+               :victoriametrics
+             ]
+    end
+
+    test "keeps a subset's order and adds nothing" do
+      assert Roles.boot_order([:api, :query]) == [:query, :api]
+      assert Roles.boot_order([:pg]) == [:pg]
+      assert Roles.boot_order([]) == []
+    end
+  end
+
   describe "parse/1" do
     test "\"all\" expands to every role" do
       assert Roles.parse("all") == {:ok, Roles.all()}
