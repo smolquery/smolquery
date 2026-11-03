@@ -56,7 +56,8 @@ defmodule Smolquery.QueryService.Runtime do
   `max_concurrent_jobs` bounds jobs in flight on this node; a submission past
   the bound is refused, not queued invisibly. `default_timeout_ms` is the sync
   path's wait and every job's runtime ceiling unless the caller says
-  otherwise. `job_memory_limit` is handed to each job engine's DuckDB
+  otherwise, and the deadline of a shard whose request names none.
+  `job_memory_limit` is handed to each job engine's DuckDB
   `memory_limit`. `result_ttl_ms` is how long a finished job holds its result
   frame for an async caller to fetch.
 
@@ -177,6 +178,15 @@ defmodule Smolquery.QueryService.Runtime do
   the plan's row count is the bound known before it runs.
   `row_partial_max_rows` is the largest `LIMIT n` a sampled subquery may
   have and still scatter (T-540): every shard ships up to `n` rows.
+  `max_concurrent_shards` (`8`, `SMOLQUERY_DISTRIBUTED_MAX_CONCURRENT_SHARDS`) is
+  `max_concurrent_jobs` for scatter shards running on this node, whether a
+  peer sent them or this node's own `local_workers` did:
+  `Smolquery.QueryService.PartialWorker.run/2` refuses a shard past it with
+  `{:error, :too_many_shards}` before it starts an engine, and the
+  coordinator answers the job from its single engine. Shards are counted
+  apart from jobs, so a node running `max_concurrent_jobs` jobs still takes
+  its shards. It lives in `distributed` because the struct is at the
+  31-field ceiling `credo` enforces.
   `local_workers`
   is how many instances run on this node when clustering is off; with
   clustering on, the workers are the group's member nodes. Each worker
@@ -256,6 +266,7 @@ defmodule Smolquery.QueryService.Runtime do
       value_list_max_rows: 50_000_000,
       row_partial_max_rows: 10_000_000,
       local_workers: 4,
+      max_concurrent_shards: 8,
       worker_memory_limit: nil,
       worker_threads: nil
     },
@@ -324,6 +335,7 @@ defmodule Smolquery.QueryService.Runtime do
             value_list_max_rows: pos_integer(),
             row_partial_max_rows: pos_integer(),
             local_workers: pos_integer(),
+            max_concurrent_shards: pos_integer(),
             worker_memory_limit: String.t() | nil,
             worker_threads: pos_integer() | nil
           },
@@ -469,6 +481,7 @@ defmodule Smolquery.QueryService.Runtime do
       value_list_max_rows: Keyword.get(opts, :value_list_max_rows, 50_000_000),
       row_partial_max_rows: Keyword.get(opts, :row_partial_max_rows, 10_000_000),
       local_workers: Keyword.get(opts, :local_workers, 4),
+      max_concurrent_shards: Keyword.get(opts, :max_concurrent_shards, 8),
       worker_memory_limit: Keyword.get(opts, :worker_memory_limit),
       worker_threads: Keyword.get(opts, :worker_threads)
     }

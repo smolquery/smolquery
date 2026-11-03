@@ -26,12 +26,18 @@ defmodule Smolquery.QueryService.WorkerTransport do
 
   ## What gen_rpc does not do
 
-  Neither path kills a worker when this caller gives up: gen_rpc cannot, and
-  a direct call has no deadline of its own. The request therefore carries
-  the job's deadline, and `Smolquery.QueryService.PartialWorker` bounds its
-  own query with it, so an abandoned shard costs at most one deadline. The
-  rpc itself waits that deadline plus a margin, the same rule the buffer
-  transport follows.
+  One rule ends a shard wherever it runs: it lives as long as the process
+  that awaits it, the one `Task.async_stream/3` kills when the job is
+  cancelled, times out or falls back. A runner shard is linked to that
+  process (below). gen_rpc cannot link, and a direct call has no link of its
+  own to a worker that outlives the call, so a peer or local request carries
+  `caller`, this process, and `Smolquery.QueryService.PartialWorker` watches
+  it and stops the shard's engine when it goes, even when the connection to
+  this node drops. The request also carries the job's deadline, which
+  bounds the shard's own query as a backstop. The rpc itself waits that
+  deadline plus a margin, the same rule the buffer transport follows. A node
+  that is full refuses a shard with `{:error, :too_many_shards}`, which comes
+  back as the shard's own result, not as a transport failure.
 
   ## Runners (PL-77)
 
@@ -138,7 +144,7 @@ defmodule Smolquery.QueryService.WorkerTransport do
   end
 
   def call(peer, name, request, _job_id, _timeout_ms) when peer == node() do
-    PartialWorker.run(name, request)
+    PartialWorker.run(name, with_caller(request))
   catch
     :exit, {:timeout, _call} -> {:error, {:worker_unreachable, peer, {:badrpc, :timeout}}}
     :exit, reason -> {:error, {:worker_unreachable, peer, {:badrpc, {:EXIT, reason}}}}
@@ -172,6 +178,8 @@ defmodule Smolquery.QueryService.WorkerTransport do
   defp remote(peer, name, request, job_id, timeout_ms) do
     destination = destination(peer, job_id)
 
+    request = with_caller(request)
+
     case :gen_rpc.call(destination, PartialWorker, :run, [name, request], deadline(timeout_ms)) do
       {:badrpc, :timeout} ->
         RpcClients.check(destination)
@@ -187,6 +195,8 @@ defmodule Smolquery.QueryService.WorkerTransport do
         result
     end
   end
+
+  defp with_caller(request), do: Map.put(request, :caller, self())
 
   defp deadline(:infinity), do: :infinity
   defp deadline(timeout_ms), do: timeout_ms + @rpc_margin_ms
