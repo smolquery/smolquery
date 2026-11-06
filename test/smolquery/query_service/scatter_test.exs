@@ -20,6 +20,14 @@ defmodule Smolquery.QueryService.ScatterTest do
     do: for(i <- 1..count, do: %{"url" => "http://buffer-#{i}:4001/m#{i}", "hot" => true})
 
   describe "targets/2" do
+    test "one target by default, which never scatters (T-769)" do
+      runtime = Runtime.new(name: :scatter_targets_default_test, catalog: MapCatalog.new())
+
+      assert runtime.distributed.local_workers == 1
+      assert [%{index: 0, kind: :peer, node: node}] = Scatter.targets(runtime, 0)
+      assert node == node()
+    end
+
     test "peers alone when the policy sized no runner" do
       assert [%{index: 0, kind: :peer, node: node}, %{index: 1, kind: :peer, node: node}] =
                Scatter.targets(runtime(burst: [enabled: true, pool: @pool]), 0)

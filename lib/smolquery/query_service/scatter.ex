@@ -30,7 +30,10 @@ defmodule Smolquery.QueryService.Scatter do
      them (PL-77). With clustering on, the peers are the query service's
      own `Smolquery.Cluster.PgGroup` members — the nodes whose supervisors
      joined the group, no probing; without, `local_workers` instances on
-     this node. Sealed files go round-robin over every target; hot units go
+     this node, one unless a test or a bench asks for more. Fewer than two
+     targets is a refusal: one machine has no spare CPU for a second engine
+     to use, and the fixed costs are the same (T-769). A leased runner is
+     a second machine, so one node with runners still scatters. Sealed files go round-robin over every target; hot units go
      round-robin over the peers alone, because a hot unit is a URL on a
      buffer pod that a runner can neither resolve nor authenticate to, so a
      burst answer reads the hot tier exactly as a peer-only one does.
@@ -247,7 +250,8 @@ defmodule Smolquery.QueryService.Scatter do
   end
 
   defp attempt(runtime, connection, plan, job_id, timeout_ms, outputs) do
-    with {:ok, ref} <- single_table(plan),
+    with :ok <- second_machine(runtime),
+         {:ok, ref} <- single_table(plan),
          {:ok, schema} <- planned_schema(plan, ref),
          {:ok, outputs} <- describe(connection, plan, outputs),
          {:ok, decomposition} <- decompose(connection, plan, outputs, schema),
@@ -279,6 +283,17 @@ defmodule Smolquery.QueryService.Scatter do
 
   defp describe(connection, %Plan{} = plan, nil),
     do: Connection.describe(connection, plan.canonical_sql, plan.params, :infinity)
+
+  defp second_machine(%Runtime{burst: %{enabled: true, request: request}})
+       when request not in [false, 0],
+       do: :ok
+
+  defp second_machine(%Runtime{} = runtime) do
+    case workers(runtime) do
+      [_first, _second | _rest] -> :ok
+      _one_or_none -> {:refused, :one_node}
+    end
+  end
 
   defp single_table(%Plan{federated: true}), do: {:refused, :federated}
   defp single_table(%Plan{tables: [ref]}), do: {:ok, ref}
@@ -355,6 +370,9 @@ defmodule Smolquery.QueryService.Scatter do
     case targets(runtime, runners) do
       [] ->
         {:refused, :no_workers}
+
+      [_only] ->
+        {:refused, :one_node}
 
       targets ->
         shards = deal(targets, units)

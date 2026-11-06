@@ -319,6 +319,46 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     refute_received {:scatter, _measurements, _meta}
   end
 
+  @tag distributed: [local_workers: 1]
+  test "one query node never scatters, even when the job asks (T-769)", %{
+    distributed: distributed
+  } do
+    assert {:ok, %{state: :done} = job, frame} =
+             Client.query(distributed, "SELECT count(*) AS n, max(id) AS m FROM analytics.events",
+               distributed: true
+             )
+
+    assert %{"n" => [15], "m" => [15]} = DataFrame.to_columns(frame)
+    assert job.scatter == nil
+    refute_received {:scatter, _measurements, _meta}
+  end
+
+  @tag distributed: [local_workers: 1]
+  @tag burst: [max: 2, min_scan_bytes: 1_000_000_000_000]
+  test "one query node stays on one engine when the policy sizes no runner (T-769)", %{
+    distributed: distributed
+  } do
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, "SELECT count(*) AS n, max(id) AS m FROM analytics.events")
+
+    assert job.scatter == nil
+    refute_received {:scatter, _measurements, _meta}
+  end
+
+  @tag distributed: [local_workers: 1]
+  @tag burst: 2
+  test "one query node with runners still scatters: a runner is a second machine (T-769)", %{
+    distributed: distributed
+  } do
+    assert {:ok, %{state: :done} = job, frame} =
+             Client.query(distributed, "SELECT count(*) AS n, max(id) AS m FROM analytics.events",
+               burst: 2
+             )
+
+    assert %{"n" => [15], "m" => [15]} = DataFrame.to_columns(frame)
+    assert %{shards: 3, peers: 1, burst: 2} = job.scatter
+  end
+
   test "a bare count(*) never scatters: the footers answer it (T-448)", %{
     control: control,
     distributed: distributed
