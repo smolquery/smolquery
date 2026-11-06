@@ -41,6 +41,14 @@ defmodule Smolquery.QueryService.ClientTest do
     end
   end
 
+  describe "scatter_available?/1 (T-769)" do
+    test "is whether the running service has a second machine, and false for one not here" do
+      assert Client.scatter_available?(start_service(distributed: [local_workers: 2]))
+      refute Client.scatter_available?(start_service())
+      refute Client.scatter_available?(:no_such_query_service)
+    end
+  end
+
   describe "query/3 (sync)" do
     test "a job's engine is in UTC, as every engine is (T-543)" do
       name = start_service()

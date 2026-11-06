@@ -30,20 +30,28 @@ defmodule Smolquery.QueryService.Scatter do
      them (PL-77). With clustering on, the peers are the query service's
      own `Smolquery.Cluster.PgGroup` members — the nodes whose supervisors
      joined the group, no probing; without, `local_workers` instances on
-     this node, one unless a test or a bench asks for more. Fewer than two
-     targets is a refusal: one machine has no spare CPU for a second engine
-     to use, and the fixed costs are the same (T-769). A leased runner is
-     a second machine, so one node with runners still scatters. Sealed files go round-robin over every target; hot units go
-     round-robin over the peers alone, because a hot unit is a URL on a
-     buffer pod that a runner can neither resolve nor authenticate to, so a
-     burst answer reads the hot tier exactly as a peer-only one does.
+     this node, one unless a test or a bench asks for more. Sealed files go
+     round-robin over every target; hot units go round-robin over the peers
+     alone, because a hot unit is a URL on a buffer pod that a runner can
+     neither resolve nor authenticate to, so a burst answer reads the hot
+     tier exactly as a peer-only one does. Fewer than two shards is a
+     refusal: one machine has no spare CPU for a second engine to use, and
+     the fixed costs are the same (T-769). A leased runner is a second
+     machine, so one node with runners still scatters, unless the backend
+     is `"local"`, whose runners share this machine. The refusal comes
+     before the job engine plans anything, so a job that stays on one
+     engine pays one catalog read, and a burst refusal it hit is counted
+     by `[:smolquery, :query, :burst_refused]`, since it has no `scatter`
+     to carry it.
      Dispatch goes through `Smolquery.QueryService.WorkerTransport`: a
      direct call for this node, gen_rpc on its own sockets for a peer
      (T-364), a task placed on a leased runner with a self-contained request
      for a runner shard, each call bounded by what is left of the job's own
      deadline. A runner shard that fails, at the lease or on the runner, is
      retried once on a peer while more than the retry floor of the deadline
-     remains (`Smolquery.Burst.Policy`); otherwise the job falls back.
+     remains (`Smolquery.Burst.Policy`); otherwise the job falls back. With
+     a single peer it falls back at once: every failed runner's retry would
+     land on that one machine, up to `max_inflight` engines at a time.
   4. Each shard decides for itself whether to read through its node's file
      cache (T-630): the request carries the job's cache mode, not the
      coordinator's verdict, because the shard's blocks land in its own
@@ -253,11 +261,11 @@ defmodule Smolquery.QueryService.Scatter do
     with :ok <- second_machine(runtime),
          {:ok, ref} <- single_table(plan),
          {:ok, schema} <- planned_schema(plan, ref),
+         {:ok, units} <- units(runtime, plan, ref),
+         {:ok, dealt} <- shards(runtime, units),
          {:ok, outputs} <- describe(connection, plan, outputs),
          {:ok, decomposition} <- decompose(connection, plan, outputs, schema),
-         :ok <- value_lists(runtime, plan, decomposition),
-         {:ok, units} <- units(runtime, plan, ref),
-         {:ok, dealt} <- shards(runtime, units) do
+         :ok <- value_lists(runtime, plan, decomposition) do
       run(runtime, connection, decomposition, ref, schema, dealt, job_id, timeout_ms)
     else
       {:refused, reason} ->
@@ -284,15 +292,33 @@ defmodule Smolquery.QueryService.Scatter do
   defp describe(connection, %Plan{} = plan, nil),
     do: Connection.describe(connection, plan.canonical_sql, plan.params, :infinity)
 
-  defp second_machine(%Runtime{burst: %{enabled: true, request: request}})
-       when request not in [false, 0],
-       do: :ok
+  defp second_machine(%Runtime{burst: %{request: request} = burst} = runtime) do
+    cond do
+      request not in [false, 0] and leases_machines?(burst) ->
+        :ok
 
-  defp second_machine(%Runtime{} = runtime) do
-    case workers(runtime) do
-      [_first, _second | _rest] -> :ok
-      _one_or_none -> {:refused, :one_node}
+      several_workers?(runtime) ->
+        :ok
+
+      true ->
+        if match?({:none, :no_pool}, Policy.runners(request, 0, burst)),
+          do: count_burst_refused(:no_pool)
+
+        {:refused, :one_node}
     end
+  end
+
+  defp leases_machines?(%{enabled: true, backend: backend}), do: backend != "local"
+  defp leases_machines?(_burst), do: false
+
+  defp several_workers?(runtime), do: match?([_first, _second | _rest], workers(runtime))
+
+  defp count_burst_refused(nil), do: :ok
+
+  defp count_burst_refused(refusal) do
+    :telemetry.execute([:smolquery, :query, :burst_refused], %{count: 1}, %{
+      reason: Policy.reason(refusal)
+    })
   end
 
   defp single_table(%Plan{federated: true}), do: {:refused, :federated}
@@ -368,27 +394,40 @@ defmodule Smolquery.QueryService.Scatter do
       end
 
     case targets(runtime, runners) do
-      [] ->
-        {:refused, :no_workers}
-
-      [_only] ->
-        {:refused, :one_node}
-
-      targets ->
-        shards = deal(targets, units)
-        runner_shards = Enum.count(shards, &(elem(&1, 0).kind == :runner))
-
-        {:ok,
-         %{
-           shards: shards,
-           runner_shards: runner_shards,
-           refused: refused || too_few_files(runners, runner_shards)
-         }}
+      [] -> {:refused, :no_workers}
+      targets -> dealt(deal(targets, units), runners, refused)
     end
+  end
+
+  defp dealt([_one_shard], runners, refused) do
+    count_burst_refused(refused || too_few_files(runners, 0))
+
+    {:refused, :one_shard}
+  end
+
+  defp dealt(shards, runners, refused) do
+    runner_shards = Enum.count(shards, &(elem(&1, 0).kind == :runner))
+
+    {:ok,
+     %{
+       shards: shards,
+       runner_shards: runner_shards,
+       refused: refused || too_few_files(runners, runner_shards)
+     }}
   end
 
   defp too_few_files(runners, 0) when runners > 0, do: :too_few_files
   defp too_few_files(_runners, _runner_shards), do: nil
+
+  @doc """
+  Whether a job on `runtime` can scatter at all: there are several workers,
+  or the node leases runners from a backend that is not this machine
+  (T-769). One query node with neither answers every job on one engine, so
+  a UI has nothing to offer it.
+  """
+  @spec second_machine?(Runtime.t()) :: boolean()
+  def second_machine?(%Runtime{} = runtime),
+    do: leases_machines?(runtime.burst) or several_workers?(runtime)
 
   @doc """
   The targets a job on `runtime` scatters over: every peer, then `runners`
@@ -933,8 +972,9 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp retry_target(%{kind: :runner} = target, context), do: other_peer(target, context)
   defp retry_target(%{merge: _level} = target, context), do: other_peer(target, context)
+  defp retry_target(%{kind: :runner}, %{peers: [_only_peer]}), do: nil
+  defp retry_target(%{kind: :runner} = target, context), do: other_peer(target, context)
   defp retry_target(_scan_on_a_peer, _context), do: nil
 
   defp other_peer(target, %{peers: peers} = context) do

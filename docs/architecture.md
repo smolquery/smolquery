@@ -1216,7 +1216,8 @@ never fails a query that works without it. A distributed answer carries
 `scatter` on the job (shard count, partial bytes); `null` means the ordinary
 scan answered, fallbacks included. It is on by default;
 `SMOLQUERY_DISTRIBUTED_QUERY=false` is the kill switch, and a job's own
-`distributed` option overrides either way.
+`distributed` option overrides it either way, except on one query node with
+no runners (below).
 
 **Where the workers are.** The workers are the nodes that hold
 the `:query` role — the members of the query service's own `:pg` group, the
@@ -1228,8 +1229,15 @@ received the request, because `Smolquery.QueryService.Client` is node-local.
 has no spare CPU to use, and it still pays the fixed costs: in the
 bench-matrix ClickBench runs, Q1 took 382 to 516 ms on one engine and 1,262 to
 2,134 ms over four.
-This holds whatever a job's `distributed` option says. A leased burst runner
-is a second machine, so one node with runners still scatters.
+This holds whatever a job's `distributed` option says. The coordinator refuses
+before the job engine plans anything, and also whenever only one shard would
+be left after the deal, such as a burst job whose files are all hot.
+
+A leased burst runner is a second machine, so one node with runners still
+scatters, unless the backend is `local`, whose runners share this machine. A
+runner shard that fails there does not retry on the only peer: each failed
+runner's retry would land on that one machine, so the job falls back to one
+engine at once.
 
 What the spike measured (PL-48, `bench/results/distributed_query.md`): at a
 constant thread budget, K instances match one instance on every shape and

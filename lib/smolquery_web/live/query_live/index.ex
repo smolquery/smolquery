@@ -16,12 +16,15 @@ defmodule SmolqueryWeb.QueryLive.Index do
 
   The Distribute toggle submits with `distributed: true` (PL-49) and starts
   enabled — the editor is where the distributed path gets exercised, while
-  the API and the deployment flag keep it opt-in. A distributed answer shows
-  a shard badge from `job.scatter`; no badge means the ordinary scan
-  answered, including every silent fallback.
+  the API and the deployment flag keep it opt-in. It renders only where a
+  job can scatter (`Smolquery.QueryService.Client.scatter_available?/1`): one
+  query node with no runners answers on one engine whatever a job asks
+  (T-769). A distributed answer shows a shard badge from `job.scatter`; no
+  badge means the ordinary scan answered, including every silent fallback.
 
   The Burst toggle and its nodes field (PL-77) render only on a node that
-  leases runners (`Smolquery.QueryService.Client.burst_enabled?/1`). The
+  leases runners (`Smolquery.QueryService.Client.burst_enabled?/1`) and can
+  scatter, so not on one query node whose runners share its machine. The
   toggle on with the field blank submits `burst: :auto`, a number from one
   up submits that many runners (anything else leaves the field as it was),
   and the toggle off submits `burst: false`. Both join the query string as
@@ -64,6 +67,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
   @impl Phoenix.LiveView
   def mount(_params, _session, socket) do
     {:ok, runtime} = Runtime.fetch(SmolqueryWeb)
+    scatter_available = QueryService.Client.scatter_available?(runtime.query_name)
 
     socket =
       socket
@@ -72,7 +76,11 @@ defmodule SmolqueryWeb.QueryLive.Index do
       |> assign(:sql, "")
       |> assign(:trace, true)
       |> assign(:distributed, true)
-      |> assign(:burst_available, QueryService.Client.burst_enabled?(runtime.query_name))
+      |> assign(:scatter_available, scatter_available)
+      |> assign(
+        :burst_available,
+        scatter_available and QueryService.Client.burst_enabled?(runtime.query_name)
+      )
       |> assign(:burst, true)
       |> assign(:burst_nodes, "")
       |> assign(:file_cache, "auto")
@@ -414,7 +422,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
               class="checkbox checkbox-sm"
             /> Trace
           </label>
-          <label class="label cursor-pointer gap-1 text-sm">
+          <label :if={@scatter_available} class="label cursor-pointer gap-1 text-sm">
             <input
               type="checkbox"
               name="query[distributed]"

@@ -20,10 +20,13 @@ defmodule Smolquery.Burst.Policy do
 
   The policy is pure. It answers from the request, the scan and the
   configuration, and when it refuses it says why, so the job can carry the
-  reason as `burstRefused`. `:off` is not a refusal worth reporting: the job
-  did not ask. Nor is `:auto` on a node without a pool, since `:auto` is
-  every job's default; an integer on such a node is `:no_pool`, because the
-  caller asked for something the deployment cannot give.
+  reason as `burstRefused`, or, when the refusal leaves one query node on one
+  engine and the job has no `scatter` to carry it, so the
+  `smolquery_query_burst_refused_total` metric can (T-769). `:off` is not a
+  refusal worth reporting: the job did not ask. Nor is `:auto` on a node
+  without a pool, since `:auto` is every job's default; an integer on such a
+  node is `:no_pool`, because the caller asked for something the deployment
+  cannot give.
 
   ## The tree merge
 

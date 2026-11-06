@@ -14,10 +14,33 @@ defmodule Smolquery.QueryService.ScatterTest do
     )
   end
 
+  defp one_worker(opts),
+    do: Runtime.new([name: :scatter_targets_test, catalog: MapCatalog.new()] ++ opts)
+
   defp sealed(count), do: for(i <- 1..count, do: %{"url" => "s3://b/f#{i}.parquet", "bytes" => i})
 
   defp hot(count),
     do: for(i <- 1..count, do: %{"url" => "http://buffer-#{i}:4001/m#{i}", "hot" => true})
+
+  describe "second_machine?/1 (T-769)" do
+    test "several workers are several machines" do
+      assert Scatter.second_machine?(runtime([]))
+    end
+
+    test "one worker with no runners is one machine" do
+      refute Scatter.second_machine?(one_worker([]))
+    end
+
+    test "one worker with a pool has a second machine, unless the backend is local" do
+      assert Scatter.second_machine?(
+               one_worker(burst: [enabled: true, pool: @pool, backend_name: "lambda"])
+             )
+
+      refute Scatter.second_machine?(
+               one_worker(burst: [enabled: true, pool: @pool, backend_name: "local"])
+             )
+    end
+  end
 
   describe "targets/2" do
     test "one target by default, which never scatters (T-769)" do

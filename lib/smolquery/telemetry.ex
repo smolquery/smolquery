@@ -198,6 +198,9 @@ defmodule Smolquery.Telemetry do
                                           meta %{workers: [node()], burst_refused, backend}
                                           — one per query the distributed path answered (PL-49);
                                           peers and burst say where its shards ran (PL-77)
+      [:smolquery, :query, :burst_refused] %{count}, meta %{reason}
+                                          — one per job a burst refusal left on one engine: it
+                                          has no scatter event to carry the reason (T-769)
       [:smolquery, :burst, :boot]         %{duration_ms}, meta %{outcome: :ok | :error, backend, runners}
                                           — one per runner the burst pool booted (PL-77)
       [:smolquery, :query, :span]         %{start_us, duration_us}, meta %{phase: closed set}
@@ -321,6 +324,7 @@ defmodule Smolquery.Telemetry do
     [:smolquery, :s3, :request],
     [:smolquery, :query, :job],
     [:smolquery, :query, :scatter],
+    [:smolquery, :query, :burst_refused],
     [:smolquery, :query, :engine],
     [:smolquery, :query, :file_cache, :sweep],
     [:smolquery, :query, :file_cache, :decision],
@@ -577,8 +581,10 @@ defmodule Smolquery.Telemetry do
       "Milliseconds scattered queries spent waiting for their slowest runner outside the " <>
         "worker: the lease, the boot when the pool grew, and the wire (PL-77).",
     "smolquery_query_burst_refused_total" =>
-      "Scattered queries that asked for burst and got no runner, by reason: under_threshold, " <>
-        "no_pool, too_few_files, or runners_unreachable (PL-77).",
+      "Queries that asked for burst and got no runner, by reason: under_threshold, no_pool, " <>
+        "too_few_files, or runners_unreachable (PL-77). A scattered query counts here, and so " <>
+        "does any query a refusal left on one engine on one query node, whether or not it " <>
+        "would have decomposed (T-769).",
     "smolquery_burst_boots_total" =>
       "Runners the burst pool booted, by outcome: ok when the runner connected, error when " <>
         "the boot failed or timed out (PL-77).",
@@ -1243,6 +1249,11 @@ defmodule Smolquery.Telemetry do
     bump({"smolquery_query_burst_wait_ms_total", []}, Map.get(measurements, :burst_wait_ms, 0))
 
     if reason = burst_refused_reason(Map.get(meta, :burst_refused)),
+      do: bump({"smolquery_query_burst_refused_total", [reason: reason]}, 1)
+  end
+
+  def handle_event([:smolquery, :query, :burst_refused], _measurements, meta, nil) do
+    if reason = burst_refused_reason(Map.get(meta, :reason)),
       do: bump({"smolquery_query_burst_refused_total", [reason: reason]}, 1)
   end
 

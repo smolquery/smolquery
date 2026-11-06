@@ -61,7 +61,9 @@ defmodule Smolquery.Burst do
   environment, `SMOLQUERY_BURST_RUNNER_MEMORY_LIMIT` and
   `SMOLQUERY_BURST_RUNNER_THREADS`, which on Lambda means the function's
   environment variables. A local runner is not a runner in this sense: it
-  shares the coordinator's host and keeps the coordinator's limits.
+  shares the coordinator's host and keeps the coordinator's limits. For the
+  same reason it is not a second machine, so one query node never scatters
+  onto local runners (T-769).
   """
 
   @pool __MODULE__.Pool

@@ -241,7 +241,17 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
       nil
     )
 
-    on_exit(fn -> :telemetry.detach(handler) end)
+    :telemetry.attach(
+      handler <> "-refused",
+      [:smolquery, :query, :burst_refused],
+      fn _event, _measurements, meta, _config -> send(parent, {:burst_refused, meta.reason}) end,
+      nil
+    )
+
+    on_exit(fn ->
+      :telemetry.detach(handler)
+      :telemetry.detach(handler <> "-refused")
+    end)
   end
 
   defp both(control, distributed, sql, opts \\ []) do
@@ -334,19 +344,41 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
   end
 
   @tag distributed: [local_workers: 1]
-  @tag burst: [max: 2, min_scan_bytes: 1_000_000_000_000]
-  test "one query node stays on one engine when the policy sizes no runner (T-769)", %{
-    distributed: distributed
-  } do
+  @tag burst: [max: 2, backend_name: "test"]
+  test "one query node that the policy sizes no runner stays on one engine and counts why (T-769)",
+       %{distributed: distributed} do
     assert {:ok, %{state: :done} = job, _frame} =
              Client.query(distributed, "SELECT count(*) AS n, max(id) AS m FROM analytics.events")
 
     assert job.scatter == nil
     refute_received {:scatter, _measurements, _meta}
+    assert_received {:burst_refused, :under_threshold}
   end
 
   @tag distributed: [local_workers: 1]
-  @tag burst: 2
+  @tag burst: [max: 2, backend_name: "test"]
+  test "one query node refuses a burst under the threshold before it plans anything (T-769)", %{
+    distributed: distributed
+  } do
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, "SELECT id FROM analytics.events LIMIT 1")
+
+    assert job.scatter == nil
+    assert_received {:burst_refused, :under_threshold}
+  end
+
+  @tag distributed: [local_workers: 1]
+  test "a count asked of one query node with no pool stays on one engine and counts no_pool (T-769)",
+       %{distributed: distributed} do
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, "SELECT sum(id) AS s FROM analytics.events", burst: 2)
+
+    assert job.scatter == nil
+    assert_received {:burst_refused, :no_pool}
+  end
+
+  @tag distributed: [local_workers: 1]
+  @tag burst: [max: 2, backend_name: "test"]
   test "one query node with runners still scatters: a runner is a second machine (T-769)", %{
     distributed: distributed
   } do
@@ -356,7 +388,53 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
              )
 
     assert %{"n" => [15], "m" => [15]} = DataFrame.to_columns(frame)
-    assert %{shards: 3, peers: 1, burst: 2} = job.scatter
+    assert %{shards: 3, peers: 1, burst: 2, backend: "test"} = job.scatter
+  end
+
+  @tag distributed: [local_workers: 1]
+  @tag burst: 2
+  test "the local backend's runners are not a second machine (T-769)", %{
+    distributed: distributed
+  } do
+    assert {:ok, %{state: :done} = job, frame} =
+             Client.query(distributed, "SELECT count(*) AS n, max(id) AS m FROM analytics.events",
+               burst: 2
+             )
+
+    assert %{"n" => [15], "m" => [15]} = DataFrame.to_columns(frame)
+    assert job.scatter == nil
+    refute_received {:burst_refused, _reason}
+  end
+
+  @tag distributed: [local_workers: 1, min_files: 1]
+  @tag burst: [max: 2, backend_name: "test"]
+  test "runners dealt no file leave one shard on one node, so the job stays on one engine (T-769)",
+       %{distributed: distributed} do
+    assert {:ok, %{state: :done} = job, frame} =
+             Client.query(distributed, "SELECT max(id) AS m FROM analytics.events WHERE id >= 13",
+               burst: 2
+             )
+
+    assert %{"m" => [15]} = DataFrame.to_columns(frame)
+    assert job.scatter == nil
+    assert_received {:burst_refused, :too_few_files}
+  end
+
+  @tag distributed: [local_workers: 1]
+  @tag burst: [dead: true, max: 2, backend_name: "test"]
+  @tag capture_log: true
+  test "failed runners on one query node fall back at once, with no retry on the node (T-769)", %{
+    distributed: distributed
+  } do
+    assert {:ok, %{state: :done} = job, frame} =
+             Client.query(distributed, "SELECT count(*) AS n, max(id) AS m FROM analytics.events",
+               burst: 2,
+               trace: true
+             )
+
+    assert %{"n" => [15], "m" => [15]} = DataFrame.to_columns(frame)
+    assert job.scatter == nil
+    refute Enum.any?(job.trace, &(&1.name == :shard and Map.get(&1.meta, :retry, false)))
   end
 
   test "a bare count(*) never scatters: the footers answer it (T-448)", %{

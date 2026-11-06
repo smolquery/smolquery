@@ -169,7 +169,8 @@ defmodule Smolquery.QueryService.Runtime do
 
   `distributed` (PL-49) is whether a job may scatter across several DuckDB
   instances — `enabled: true` by default; the flag is the kill switch, and
-  a job's own `distributed:` option overrides it either way. `min_files` is
+  a job's own `distributed:` option overrides it either way, except that one
+  query node with no runners never scatters (T-769). `min_files` is
   the smallest shardable file count worth the fixed costs.
   `value_list_max_rows` is the most rows a plan may read and still scatter
   an aggregate that ships values and not numbers, a `uniqExact` or a
