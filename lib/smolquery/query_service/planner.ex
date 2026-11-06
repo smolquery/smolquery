@@ -383,7 +383,9 @@ defmodule Smolquery.QueryService.Planner do
 
   defp log_disagreement(ids) do
     Logger.warning(fn ->
-      "hot manifest stamp and catalog disagree on #{Enum.join(ids, ", ")}: " <>
+      disputed = Enum.join(ids, ", ")
+
+      "hot manifest stamp and catalog disagree on #{disputed}: " <>
         "stamped at or before the plan's snapshot, but their keys are not registered " <>
         "there; reading the manifest whole"
     end)
