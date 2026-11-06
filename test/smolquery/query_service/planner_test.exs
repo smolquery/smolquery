@@ -443,17 +443,27 @@ defmodule Smolquery.QueryService.PlannerTest do
       assert [%{"url" => "http://hot.test/01A.parquet"}] = plan.hot[@table]
     end
 
-    test "a reduced entry the catalog does not hold fails the plan, never a short answer (T-328)" do
+    test "a reduced entry the catalog does not hold is read whole, and logged (T-328)" do
       runtime =
         runtime([
           entry("01A", %{
             "claim_keys" => ["analytics/events/01SEALED.parquet"],
             "sealed_at" => @snapshot
-          })
+          }),
+          entry("01B")
         ])
 
-      assert {:error, {:hot_tier_unavailable, @table, {:settled_member, ["01A"]}}} =
-               Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
+      log =
+        capture_log(fn ->
+          assert {:ok, plan} = Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
+
+          assert [
+                   %{"id" => "01A", "url" => "http://hot.test/01A.parquet"},
+                   %{"id" => "01B"}
+                 ] = plan.hot[@table]
+        end)
+
+      assert log =~ "stamp and catalog disagree on 01A"
     end
 
     test "a claimed entry whose sealed keys are all present at the snapshot is excluded" do

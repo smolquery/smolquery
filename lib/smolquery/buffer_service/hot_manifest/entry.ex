@@ -6,10 +6,11 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
   segment's key, its size, and the flush-time min-max stats the writer produced.
   It also carries the two facts the seal handoff turns on — `sealed_at`, the
   catalog snapshot a sealer committed this segment at, and `retired_at`, when that
-  happened. A query at snapshot `S` includes an entry only if it is unsealed or
-  `sealed_at > S`; the grace-period reaper deletes on `retired_at`. One is a
-  correctness rule, the other a cleanup schedule, which is why they are separate
-  fields rather than one timestamp.
+  happened. Whether a query counts an entry goes by `claim_keys` against the catalog,
+  not by either field (`Smolquery.QueryService.Planner`). `sealed_at` only decides how
+  much of the entry a read at a snapshot is sent (`HotManifest.entries_at/4`); the
+  grace-period reaper deletes on `retired_at`. One saves a read, the other is a
+  cleanup schedule, which is why they are separate fields rather than one timestamp.
 
   ## Records survive a restart, so stats are typed on the way out
 
@@ -116,7 +117,9 @@ defmodule Smolquery.BufferService.HotManifest.Entry do
   produce. It is what makes the handoff exactly-once, and it is deliberately
   *not* `sealed_at`: a planner cannot tell from a snapshot stamp whether the
   commit it describes is visible to *its* snapshot, but it can ask whether these
-  keys are in the catalog's segment list at the snapshot it is reading.
+  keys are in the catalog's segment list at the snapshot it is reading. The buffer
+  does read the stamp, but only to send less of an entry (`HotManifest.entries_at/4`),
+  and the planner still applies the rule to what it gets.
   """
   @spec claimed?(t()) :: boolean()
   def claimed?(%__MODULE__{claim_keys: keys}), do: keys != []

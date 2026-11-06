@@ -66,11 +66,13 @@ defmodule Smolquery.QueryService.Planner do
   The manifest read carries `S` (T-328), since a sealed entry stays in the
   manifest for `retire_grace_ms`. The buffer reduces an entry whose `sealed_at`
   is at or before `S` to its id, `sealed_at` and claim keys. The rule above still
-  decides, on those same keys, so the fetch costs less and no answer changes. If
-  the rule ever keeps a reduced entry, the stamp and the catalog disagree and its
-  rows cannot be read from what came back, so the plan fails with
-  `{:hot_tier_unavailable, ref, {:settled_member, ids}}`: a failed query, never a
-  short answer.
+  decides, on those same keys, so the fetch costs less and no answer changes.
+
+  The rule can keep a reduced entry when the stamp and the catalog disagree: the
+  entry outlived `snapshot_keep_ms`, so snapshot expiry took its key out of
+  `registered_through`, or the catalog was restored from a backup. Its rows cannot
+  be read from what came back, so the plan logs the ids and reads the manifest again
+  without `S`. It then answers as if the buffer had never reduced anything.
 
   ## A pinned plan (PL-58 layers 7 and 8)
 
@@ -329,12 +331,8 @@ defmodule Smolquery.QueryService.Planner do
          top_n = TopN.spec(statement, refs),
          any_n = AnyN.spec(statement, refs),
          page = newest_page(any_n, runtime, tables, pin),
-         {:ok, manifests} <-
-           Trace.span(:manifests, fn ->
-             manifests(runtime, refs, tables, &read_opts(&1, snapshot, conjuncts, top_n), page)
-           end),
-         {:ok, members} <-
-           Trace.span(:members, fn -> members(refs, tables, manifests, pin) end) do
+         read_opts = &read_opts(&1, snapshot, conjuncts, top_n),
+         {:ok, members} <- read_members(runtime, refs, tables, read_opts, page, pin) do
       pruned = Trace.span(:prune, fn -> pruned(members, tables, conjuncts) end)
 
       hot =
@@ -369,16 +367,46 @@ defmodule Smolquery.QueryService.Planner do
     if age_ms <= max_age_ms, do: :ok, else: {:error, {:pinned_hot_expired, age_ms, max_age_ms}}
   end
 
+  defp read_members(runtime, refs, tables, read_opts, page, pin) do
+    with {:ok, members} <- members_read(runtime, refs, tables, read_opts, page, pin) do
+      case settled_members(members) do
+        [] ->
+          {:ok, members}
+
+        ids ->
+          log_disagreement(ids)
+          whole = &Keyword.delete(read_opts.(&1), :snapshot)
+          members_read(runtime, refs, tables, whole, page, pin)
+      end
+    end
+  end
+
+  defp log_disagreement(ids) do
+    Logger.warning(fn ->
+      "hot manifest stamp and catalog disagree on #{Enum.join(ids, ", ")}: " <>
+        "stamped at or before the plan's snapshot, but their keys are not registered " <>
+        "there; reading the manifest whole"
+    end)
+  end
+
+  defp members_read(runtime, refs, tables, read_opts, page, pin) do
+    with {:ok, manifests} <-
+           Trace.span(:manifests, fn -> manifests(runtime, refs, tables, read_opts, page) end) do
+      Trace.span(:members, fn -> members(refs, tables, manifests, pin) end)
+    end
+  end
+
+  defp settled_members(members) do
+    for {_ref, entries} <- members, entry <- entries, is_nil(entry["url"]), do: entry["id"]
+  end
+
   defp members(refs, tables, manifests, pin) do
     hot_ids = Keyword.get(pin, :hot_ids, %{})
     hot_before_ms = Keyword.get(pin, :hot_before_ms)
 
     Enum.reduce_while(refs, {:ok, %{}}, fn ref, {:ok, acc} ->
-      with {:ok, entries} <-
-             ref_members(ref, manifests[ref], tables[ref].sealed, hot_ids, hot_before_ms),
-           :ok <- readable(ref, entries) do
-        {:cont, {:ok, Map.put(acc, ref, entries)}}
-      else
+      case ref_members(ref, manifests[ref], tables[ref].sealed, hot_ids, hot_before_ms) do
+        {:ok, entries} -> {:cont, {:ok, Map.put(acc, ref, entries)}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
@@ -393,15 +421,6 @@ defmodule Smolquery.QueryService.Planner do
         {:ok, Enum.filter(manifest, &member?(&1, sealed, hot_before_ms))}
     end
   end
-
-  defp readable(ref, entries) do
-    case Enum.reject(entries, & &1["url"]) do
-      [] -> :ok
-      reduced -> {:error, {:hot_tier_unavailable, ref, {:settled_member, ids_of(reduced)}}}
-    end
-  end
-
-  defp ids_of(entries), do: Enum.map(entries, & &1["id"])
 
   # The one membership rule for an unpinned table: not claimed by a seal
   # the snapshot already holds, and stamped before the pin's bound. The

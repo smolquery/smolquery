@@ -78,8 +78,9 @@ defmodule Smolquery.BufferService.HotClient do
     * `:snapshot` — the catalog version the caller's plan is pinned at, on a
       whole-manifest read (T-328). An entry whose seal that version holds comes
       back as `id`, `sealed_at` and `claim_keys` alone, with no `url`, so a
-      caller must apply the membership rule to it and read it no further. A
-      node from before this parameter ignores it and answers every entry whole.
+      caller must apply the membership rule to it, and read again without the
+      option if the rule keeps it. A node from before this parameter ignores
+      it and answers every entry whole.
     * `:timeout_ms` — how long to wait for the response.
 
   A scoped read goes out as a `POST`, because 1,024 ULIDs do not fit in a URL.

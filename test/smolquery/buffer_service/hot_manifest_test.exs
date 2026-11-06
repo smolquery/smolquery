@@ -160,6 +160,16 @@ defmodule Smolquery.BufferService.HotManifestTest do
       assert HotManifest.entries_at(manifest, @table, 4, stats: false) == [%{entry | stats: %{}}]
     end
 
+    test "reports its reads under its own op", %{manifest: manifest} do
+      _entry = add(manifest, @table, rows(1))
+      ref = :telemetry_test.attach_event_handlers(self(), [[:smolquery, :hot_manifest, :read]])
+
+      _read = HotManifest.entries_at(manifest, @table, 4)
+
+      assert_received {[:smolquery, :hot_manifest, :read], ^ref, %{entries: 1},
+                       %{op: :entries_at}}
+    end
+
     test "reads only the table it is asked for", %{manifest: manifest} do
       other = {"analytics", "other"}
       _elsewhere = add(manifest, other, rows(1))

@@ -123,10 +123,10 @@ defmodule Smolquery.BufferService.Client do
   @doc """
   The table's hot manifest — every micro-segment its owner holds for it.
 
-  Entries carry the flush-time min-max stats a planner prunes on, and `sealed_at`,
-  which is what makes the seal handoff exactly-once. Applying that rule is the
-  planner's job: at catalog snapshot `S`, include an entry only if it is unsealed
-  or `sealed_at > S`.
+  Entries carry the flush-time min-max stats a planner prunes on, and the
+  `claim_keys` that make the seal handoff exactly-once. Applying that rule is the
+  planner's job: at catalog snapshot `S`, include an entry only if it has no claim,
+  or its claim's keys are not all registered by `S`.
   """
   @spec hot_manifest(atom(), Store.table_ref()) :: {:ok, [Entry.t()]} | {:error, term()}
   def hot_manifest(name, table_ref) do

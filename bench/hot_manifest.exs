@@ -65,6 +65,11 @@ defmodule Bench.HotManifest do
     reads/s against a 1,024 backlog the `GET` route costs 25% of commit
     throughput *and still misses the offered rate*, achieving 11.9 of 20. The
     `POST` route meets the full rate at no measurable commit cost.
+  - **A read at a snapshot costs a sealed entry almost nothing (T-328).** At 105
+    columns and 16,384 sealed entries, `entries` took 348 ms and returned 343 MiB,
+    and `entries_at` took 6.7 ms and returned 3.4 MiB. A body reading
+    `{:map_get, field, :"$1"}` copies the whole entry per row, so it took 189 ms
+    to return the same 3.4 MiB until the match head bound the fields itself.
   - **Filling the fixture found a second O(backlog) term, on the write path.**
     Commit rate fell with backlog depth with no reader running at all — the
     buffer's own maintenance tick (T-317). See `bench/buffer.exs`'s
@@ -92,6 +97,7 @@ defmodule Bench.HotManifest do
     sections = [
       index_cost: &index_cost/1,
       index_size: &index_size/1,
+      settled_read: &settled_read/1,
       read_cost: &read_cost/1,
       entry_width: &entry_width/1,
       serve_rate: &serve_rate/1,
@@ -147,6 +153,44 @@ defmodule Bench.HotManifest do
           "#{pad(reps(fn -> HotManifest.live_claim(manifest, @table) end, 51), 13)}   " <>
           "#{pad(reps(fn -> HotManifest.retired_before(manifest, @table, 2_000_000) end, 51), 7)}   " <>
           "#{pad(reps(fn -> HotManifest.empty?(manifest, @table) end, 51), 9)}"
+      )
+
+      :ets.delete_all_objects(name)
+    end
+  end
+
+  defp settled_read(_dir) do
+    heading("what a read at a snapshot costs, when every entry is sealed (T-328)")
+
+    columns = env("COLUMNS", 32)
+    depths = sweep_env("INDEX_DEPTHS", [1_024, 4_096, 16_384, 65_536])
+
+    IO.puts(
+      "\n  #{columns} columns, every entry sealed and inside retire_grace_ms. A plan at or " <>
+        "after those\n  seals only rejects them. `entries_at` should cost a small part of " <>
+        "`entries`, and\n  KiB is what the term copied out of ETS holds.\n"
+    )
+
+    IO.puts("  depth    entries us   no stats us   entries_at us   entries KiB   entries_at KiB")
+
+    for depth <- depths do
+      name = :"settled_read_#{depth}_#{System.unique_integer([:positive])}"
+      {:ok, _pid} = HotManifest.start_link(name: name)
+      manifest = HotManifest.new(name: name, log_dir: "/tmp/#{name}", store: nil)
+
+      for id <- index_ids(depth) do
+        sealed = %{index_entry(id, columns) | sealed_at: 1, claim_keys: ["k/#{id}.parquet"]}
+        :ets.insert(name, {{@table, id}, sealed})
+      end
+
+      kib = &div(:erts_debug.flat_size(&1) * :erlang.system_info(:wordsize), 1024)
+      read_at = fn -> HotManifest.entries_at(manifest, @table, 1) end
+      whole = fn -> HotManifest.entries(manifest, @table) end
+
+      IO.puts(
+        "  #{pad(depth, 5)}    #{pad(reps(whole, 11), 10)}   " <>
+          "#{pad(reps(fn -> HotManifest.entries(manifest, @table, :all, stats: false) end, 11), 11)}   " <>
+          "#{pad(reps(read_at, 11), 13)}   #{pad(kib.(whole.()), 11)}   #{pad(kib.(read_at.()), 14)}"
       )
 
       :ets.delete_all_objects(name)
