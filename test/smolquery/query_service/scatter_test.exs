@@ -1,8 +1,11 @@
 defmodule Smolquery.QueryService.ScatterTest do
   use ExUnit.Case, async: true
 
+  alias Smolquery.QueryService.Plan
   alias Smolquery.QueryService.Runtime
   alias Smolquery.QueryService.Scatter
+  alias Smolquery.QueryService.Statistics
+  alias Smolquery.Schema
   alias Smolquery.Test.MapCatalog
 
   @pool __MODULE__.Pool
@@ -39,6 +42,66 @@ defmodule Smolquery.QueryService.ScatterTest do
       refute Scatter.second_machine?(
                one_worker(burst: [enabled: true, pool: @pool, backend_name: "local"])
              )
+    end
+  end
+
+  describe "execute/6 on one worker with a pool (T-769)" do
+    defp sized_plan(sealed_bytes) do
+      %Plan{
+        sql: "SELECT 1",
+        canonical_sql: "SELECT 1",
+        snapshot: 1,
+        tables: [{"analytics", "events"}],
+        schemas: %{{"analytics", "events"} => Schema.new!([{"id", :int64}])},
+        params: [],
+        statistics:
+          sealed_bytes &&
+            Statistics.new(Statistics.tier(0, 0, 0, 0), Statistics.tier(1, 1, 1, 1, sealed_bytes))
+      }
+    end
+
+    defp engine_watcher do
+      test = self()
+      spawn_link(fn -> receive(do: (_message -> send(test, :engine_touched))) end)
+    end
+
+    defp pooled(request) do
+      one_worker(burst: [enabled: true, pool: @pool, backend_name: "lambda", request: request])
+    end
+
+    test "auto under the threshold refuses without touching the engine" do
+      assert Scatter.execute(pooled(:auto), engine_watcher(), sized_plan(1), "job", 1_000) ==
+               :fallback
+
+      refute_received :engine_touched
+    end
+
+    test "auto over the threshold goes on to plan" do
+      Process.flag(:trap_exit, true)
+      bytes = 16 * 1024 * 1024 * 1024
+
+      assert Scatter.execute(pooled(:auto), engine_watcher(), sized_plan(bytes), "job", 1_000) ==
+               :fallback
+
+      assert_receive :engine_touched
+    end
+
+    test "a plan with no sizes goes on to plan, since only the file list can tell" do
+      Process.flag(:trap_exit, true)
+
+      assert Scatter.execute(pooled(:auto), engine_watcher(), sized_plan(nil), "job", 1_000) ==
+               :fallback
+
+      assert_receive :engine_touched
+    end
+
+    test "a job that asked for no runner refuses without touching the engine" do
+      bytes = 16 * 1024 * 1024 * 1024
+
+      assert Scatter.execute(pooled(false), engine_watcher(), sized_plan(bytes), "job", 1_000) ==
+               :fallback
+
+      refute_received :engine_touched
     end
   end
 

@@ -345,26 +345,26 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
   @tag distributed: [local_workers: 1]
   @tag burst: [max: 2, backend_name: "test"]
-  test "one query node that the policy sizes no runner stays on one engine and counts why (T-769)",
+  test "auto under the threshold on one query node stays on one engine and counts nothing (T-769)",
        %{distributed: distributed} do
     assert {:ok, %{state: :done} = job, _frame} =
              Client.query(distributed, "SELECT count(*) AS n, max(id) AS m FROM analytics.events")
 
     assert job.scatter == nil
     refute_received {:scatter, _measurements, _meta}
-    assert_received {:burst_refused, :under_threshold}
+    refute_received {:burst_refused, _reason}
   end
 
-  @tag distributed: [local_workers: 1]
+  @tag distributed: [local_workers: 1, min_files: 100]
   @tag burst: [max: 2, backend_name: "test"]
-  test "one query node refuses a burst under the threshold before it plans anything (T-769)", %{
+  test "a count over too few files stays on one engine and counts too_few_files (T-769)", %{
     distributed: distributed
   } do
     assert {:ok, %{state: :done} = job, _frame} =
-             Client.query(distributed, "SELECT id FROM analytics.events LIMIT 1")
+             Client.query(distributed, "SELECT max(id) AS m FROM analytics.events", burst: 2)
 
     assert job.scatter == nil
-    assert_received {:burst_refused, :under_threshold}
+    assert_received {:burst_refused, :too_few_files}
   end
 
   @tag distributed: [local_workers: 1]
@@ -393,7 +393,7 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
 
   @tag distributed: [local_workers: 1]
   @tag burst: 2
-  test "the local backend's runners are not a second machine (T-769)", %{
+  test "the local backend's runners are not a second machine, and a count says so (T-769)", %{
     distributed: distributed
   } do
     assert {:ok, %{state: :done} = job, frame} =
@@ -402,6 +402,18 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
              )
 
     assert %{"n" => [15], "m" => [15]} = DataFrame.to_columns(frame)
+    assert job.scatter == nil
+    assert_received {:burst_refused, :same_machine}
+  end
+
+  @tag distributed: [local_workers: 1]
+  @tag burst: 2
+  test "auto on the local backend on one query node counts nothing (T-769)", %{
+    distributed: distributed
+  } do
+    assert {:ok, %{state: :done} = job, _frame} =
+             Client.query(distributed, "SELECT max(id) AS m FROM analytics.events")
+
     assert job.scatter == nil
     refute_received {:burst_refused, _reason}
   end
@@ -435,6 +447,40 @@ defmodule Smolquery.QueryService.ScatterIntegrationTest do
     assert %{"n" => [15], "m" => [15]} = DataFrame.to_columns(frame)
     assert job.scatter == nil
     refute Enum.any?(job.trace, &(&1.name == :shard and Map.get(&1.meta, :retry, false)))
+    assert_received {:burst_refused, :runners_unreachable}
+  end
+
+  @tag distributed: [local_workers: 1]
+  @tag burst: [
+         max: 4,
+         backend_name: "test",
+         spill: true,
+         spill_inline_max_bytes: 0,
+         merge_min_bytes: 0,
+         merge_target_bytes: 1,
+         merge_partitions: 2,
+         merge_peer_weight: 0,
+         flaky: %{"/5.parquet" => :infinity}
+       ]
+  test "a failed runner merge shard on one query node leaves its inputs, with no retry (T-769)",
+       %{
+         catalog: catalog,
+         control: control,
+         distributed: distributed,
+         tmp_dir: tmp_dir
+       } do
+    seal_seventh(catalog, tmp_dir)
+    sql = "SELECT id, count(*) AS c FROM analytics.events GROUP BY id ORDER BY id"
+
+    assert {:ok, %{state: :done} = job, frame} =
+             Client.query(distributed, sql, burst: 4, trace: true)
+
+    assert {:ok, %{state: :done}, control_frame} = Client.query(control, sql)
+    assert_columns(DataFrame.to_columns(control_frame), DataFrame.to_columns(frame))
+
+    assert %{peers: 1, burst: 4} = job.scatter
+    assert %{outcome: :partial, failed_shards: 1} = tree_merge(job).meta
+    assert [] = merge_shards(job, &Map.get(&1.meta, :retry, false))
   end
 
   test "a bare count(*) never scatters: the footers answer it (T-448)", %{

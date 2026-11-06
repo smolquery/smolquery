@@ -19,8 +19,11 @@ defmodule SmolqueryWeb.QueryLive.Index do
   the API and the deployment flag keep it opt-in. It renders only where a
   job can scatter (`Smolquery.QueryService.Client.scatter_available?/1`): one
   query node with no runners answers on one engine whatever a job asks
-  (T-769). A distributed answer shows a shard badge from `job.scatter`; no
-  badge means the ordinary scan answered, including every silent fallback.
+  (T-769). Where it is hidden, a form change leaves the choice as it was and
+  out of the URL, so a page that mounted while its node was alone does not
+  opt out once peers rejoin. A distributed answer shows a shard badge from
+  `job.scatter`; no badge means the ordinary scan answered, including every
+  silent fallback.
 
   The Burst toggle and its nodes field (PL-77) render only on a node that
   leases runners (`Smolquery.QueryService.Client.burst_enabled?/1`) and can
@@ -160,7 +163,7 @@ defmodule SmolqueryWeb.QueryLive.Index do
     socket
     |> assign(:sql, Map.get(query, "sql", socket.assigns.sql))
     |> assign(:trace, Map.get(query, "trace") == "true")
-    |> assign(:distributed, Map.get(query, "distributed") == "true")
+    |> assign(:distributed, distributed_choice(socket.assigns, query))
     |> assign(:burst, Map.get(query, "burst") == "true")
     |> assign(
       :burst_nodes,
@@ -169,6 +172,9 @@ defmodule SmolqueryWeb.QueryLive.Index do
     |> assign(:file_cache, cache_choice(Map.get(query, "file_cache"), socket.assigns.file_cache))
     |> assign_sql_in_url()
   end
+
+  defp distributed_choice(%{scatter_available: false, distributed: current}, _query), do: current
+  defp distributed_choice(_assigns, query), do: Map.get(query, "distributed") == "true"
 
   defp cache_choice(choice, _current) when choice in ["auto", "on", "off"], do: choice
   defp cache_choice(_absent_or_other, current), do: current
@@ -191,6 +197,9 @@ defmodule SmolqueryWeb.QueryLive.Index do
   defp burst_opt(%{burst: false}), do: [burst: false]
   defp burst_opt(%{burst_nodes: ""}), do: [burst: :auto]
   defp burst_opt(%{burst_nodes: nodes}), do: [burst: String.to_integer(nodes)]
+
+  defp distributed_params(%{scatter_available: false}), do: []
+  defp distributed_params(%{distributed: distributed}), do: [distributed: to_string(distributed)]
 
   defp burst_params(%{burst_available: false}), do: []
 
@@ -222,17 +231,13 @@ defmodule SmolqueryWeb.QueryLive.Index do
          %{
            sql: sql,
            trace: trace,
-           distributed: distributed,
            file_cache: file_cache,
            sql_in_url: sql_in_url
          } = assigns
        ) do
     flag_params =
-      [
-        trace: to_string(trace),
-        distributed: to_string(distributed),
-        file_cache: file_cache
-      ] ++ burst_params(assigns)
+      [trace: to_string(trace)] ++
+        distributed_params(assigns) ++ [file_cache: file_cache] ++ burst_params(assigns)
 
     if sql == "" or not sql_in_url do
       flag_params

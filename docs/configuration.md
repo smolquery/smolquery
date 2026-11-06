@@ -207,7 +207,7 @@ environment sets). Every other row is read on the node that leases.
 
 | variable | effect (default) |
 |---|---|
-| `SMOLQUERY_BURST_BACKEND` | Names the backend and switches the pool on (unset: this node leases no runners). `local` runs runners inside this VM (`FLAME.LocalBackend`), for development and tests; `lambda` leases one AWS Lambda invocation per runner (`Smolquery.Burst.LambdaBackend`), see docs/deployment.md |
+| `SMOLQUERY_BURST_BACKEND` | Names the backend and switches the pool on (unset: this node leases no runners). `local` runs runners inside this VM (`FLAME.LocalBackend`), for development and tests, and does nothing on one query node: its runners share that machine, so a job never scatters there (T-769), and exercising it takes two clustered nodes; `lambda` leases one AWS Lambda invocation per runner (`Smolquery.Burst.LambdaBackend`), see docs/deployment.md |
 | `SMOLQUERY_BURST_LAMBDA_FUNCTION` | With the `lambda` backend: the function's name. Required |
 | `SMOLQUERY_BURST_LAMBDA_REGION` | With the `lambda` backend: the function's region. Required |
 | `SMOLQUERY_BURST_MAX_LIFETIME_MS` | How long a runner lives before it stops itself (`840000`, 14 minutes; at most what a timer takes, 4294967295), under the host's own cap (15 minutes on Lambda), so a runner ends with an orderly shutdown instead of the host's mid-scan kill and timed-out invocation; a shard on it fails as unreachable, which the scatter retries on a peer. The parent passes it in the runner's assignment; on a runner it is read from the environment |

@@ -1230,14 +1230,19 @@ has no spare CPU to use, and it still pays the fixed costs: in the
 bench-matrix ClickBench runs, Q1 took 382 to 516 ms on one engine and 1,262 to
 2,134 ms over four.
 This holds whatever a job's `distributed` option says. The coordinator refuses
-before the job engine plans anything, and also whenever only one shard would
-be left after the deal, such as a burst job whose files are all hot.
+before the job engine plans anything. On a node that leases runners, an `auto`
+job is judged from the plan's own sealed bytes, with no catalog read. It also
+refuses whenever only one shard would be left after the deal, such as a burst
+job whose files are all hot.
 
 A leased burst runner is a second machine, so one node with runners still
 scatters, unless the backend is `local`, whose runners share this machine. A
 runner shard that fails there does not retry on the only peer: each failed
 runner's retry would land on that one machine, so the job falls back to one
-engine at once.
+engine at once, and a failed runner merge shard leaves its inputs to the final
+merge. The shard the node ran for itself stops when the scatter gives up on it:
+its engine's canceller cancels the statement when the shard's task is killed,
+so it does not scan beside the fallback.
 
 What the spike measured (PL-48, `bench/results/distributed_query.md`): at a
 constant thread budget, K instances match one instance on every shape and

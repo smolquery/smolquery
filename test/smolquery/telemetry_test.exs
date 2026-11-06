@@ -123,13 +123,17 @@ defmodule Smolquery.TelemetryTest do
   end
 
   test "a burst refusal that left a job on one engine counts by reason (T-769)" do
-    refused = ~s({reason="no_pool"})
-    before_refused = value("smolquery_query_burst_refused_total", refused)
     before_scattered = value("smolquery_query_scattered_total")
 
-    :telemetry.execute([:smolquery, :query, :burst_refused], %{count: 1}, %{reason: :no_pool})
+    for reason <- [:no_pool, :same_machine] do
+      refused = ~s({reason="#{reason}"})
+      before_refused = value("smolquery_query_burst_refused_total", refused)
 
-    assert value("smolquery_query_burst_refused_total", refused) == before_refused + 1
+      :telemetry.execute([:smolquery, :query, :burst_refused], %{count: 1}, %{reason: reason})
+
+      assert value("smolquery_query_burst_refused_total", refused) == before_refused + 1
+    end
+
     assert value("smolquery_query_scattered_total") == before_scattered
   end
 

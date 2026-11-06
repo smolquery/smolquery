@@ -278,12 +278,12 @@ One note per release, newest first.
 - **Why.** Those 4 workers and the job engine shared one machine, so they had no extra CPU to use. Each one took the whole thread count and the whole `SMOLQUERY_JOB_MEMORY_LIMIT`. In the bench-matrix ClickBench runs, Q1 took 382 to 516 ms on one engine and 1,262 to 2,134 ms over four.
 - **`SMOLQUERY_DISTRIBUTED_LOCAL_WORKERS`.** The node now ignores it. Remove it from your configuration.
 - **A job's `"distributed": true`.** It no longer forces a scatter on one query node. The job answers on one engine, with `"scatter": null`.
-- **Scan threads.** A scan now gets one engine's threads. If you cap `SMOLQUERY_READ_ENGINE_THREADS` below the core count, a scan gets fewer threads than before: 16 cores capped at 4 ran 16 threads over four workers, and now runs 4. Each thread is also one `httpfs` request at a time, so a cold S3 scan can slow down with cores idle. Raise the cap or unset it.
+- **Scan threads.** A scan now gets one engine's threads. If you cap `SMOLQUERY_READ_ENGINE_THREADS` below the core count, a scan gets fewer threads than before: 16 cores capped at 4 ran 16 threads over four workers, and now runs 4. This setting is also the ceiling on a scan's `httpfs` requests, so a cold S3 scan can slow down with cores idle. Raise the cap or unset it.
 - **Scan memory.** A scan now gets one `SMOLQUERY_JOB_MEMORY_LIMIT`, where each of the four workers used to take a whole one. A heavy aggregate can spill more, or fail with an out-of-memory error, and this path has no further fallback. Review the limit before you upgrade.
 - **Burst.** A leased runner is a second machine, so one node with runners still scatters. The `local` backend's runners share the node's machine, so they no longer count.
-- **Failed runners on one node.** A runner shard that fails no longer retries on the node itself, because every failed runner's retry would land on that one machine. The job falls back to one engine at once.
-- **`burstRefused` on one node.** A job that a refusal leaves on one engine answers `"scatter": null`, so it carries no reason. The reason still counts in `smolquery_query_burst_refused_total`.
-- **More than one query node.** Nothing changes.
+- **Failed runners on one node.** A runner shard that fails no longer retries on the node itself, because every failed runner's retry would land on that one machine. A failed scan shard falls back to one engine at once, and a failed merge shard leaves its inputs to the final merge. One lost runner in a large scan therefore means a full rescan on one engine.
+- **`burstRefused` on one node.** A job that a refusal leaves on one engine answers `"scatter": null`, so it carries no reason. `smolquery_query_burst_refused_total` counts it when the job asked for more than the node could give, with a new `same_machine` reason for a count asked of the `local` backend. An `auto` job under the threshold counts nothing there.
+- **More than one query node.** Two small changes. A job dealt a single shard now answers on one engine, with `"scatter": null`, instead of a one-shard scatter. A job with too few files for the burst it asked for now counts as `too_few_files` in `smolquery_query_burst_refused_total`.
 
 ### Unreleased: a table change during a node's boot no longer answers 500 (T-767)
 
