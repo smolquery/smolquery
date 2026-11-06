@@ -63,6 +63,15 @@ defmodule Smolquery.QueryService.Planner do
   Hot rows have no snapshot: an unclaimed micro-segment is always included.
   That is read-your-writes, not an inconsistency.
 
+  The manifest read carries `S` (T-328), since a sealed entry stays in the
+  manifest for `retire_grace_ms`. The buffer reduces an entry whose `sealed_at`
+  is at or before `S` to its id, `sealed_at` and claim keys. The rule above still
+  decides, on those same keys, so the fetch costs less and no answer changes. If
+  the rule ever keeps a reduced entry, the stamp and the catalog disagree and its
+  rows cannot be read from what came back, so the plan fails with
+  `{:hot_tier_unavailable, ref, {:settled_member, ids}}`: a failed query, never a
+  short answer.
+
   ## A pinned plan (PL-58 layers 7 and 8)
 
   `plan/4` takes a pin. `snapshot:` reads the sealed tier at that version
@@ -322,7 +331,7 @@ defmodule Smolquery.QueryService.Planner do
          page = newest_page(any_n, runtime, tables, pin),
          {:ok, manifests} <-
            Trace.span(:manifests, fn ->
-             manifests(runtime, refs, tables, &reads_stats?(&1, conjuncts, top_n), page)
+             manifests(runtime, refs, tables, &read_opts(&1, snapshot, conjuncts, top_n), page)
            end),
          {:ok, members} <-
            Trace.span(:members, fn -> members(refs, tables, manifests, pin) end) do
@@ -365,8 +374,11 @@ defmodule Smolquery.QueryService.Planner do
     hot_before_ms = Keyword.get(pin, :hot_before_ms)
 
     Enum.reduce_while(refs, {:ok, %{}}, fn ref, {:ok, acc} ->
-      case ref_members(ref, manifests[ref], tables[ref].sealed, hot_ids, hot_before_ms) do
-        {:ok, entries} -> {:cont, {:ok, Map.put(acc, ref, entries)}}
+      with {:ok, entries} <-
+             ref_members(ref, manifests[ref], tables[ref].sealed, hot_ids, hot_before_ms),
+           :ok <- readable(ref, entries) do
+        {:cont, {:ok, Map.put(acc, ref, entries)}}
+      else
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
@@ -381,6 +393,15 @@ defmodule Smolquery.QueryService.Planner do
         {:ok, Enum.filter(manifest, &member?(&1, sealed, hot_before_ms))}
     end
   end
+
+  defp readable(ref, entries) do
+    case Enum.reject(entries, & &1["url"]) do
+      [] -> :ok
+      reduced -> {:error, {:hot_tier_unavailable, ref, {:settled_member, ids_of(reduced)}}}
+    end
+  end
+
+  defp ids_of(entries), do: Enum.map(entries, & &1["id"])
 
   # The one membership rule for an unpinned table: not claimed by a seal
   # the snapshot already holds, and stamped before the pin's bound. The
@@ -426,6 +447,9 @@ defmodule Smolquery.QueryService.Planner do
   defp reads_stats?(ref, conjuncts, top_n) do
     Map.has_key?(conjuncts, ref) or match?(%{ref: ^ref}, top_n)
   end
+
+  defp read_opts(ref, snapshot, conjuncts, top_n),
+    do: [stats: reads_stats?(ref, conjuncts, top_n), snapshot: snapshot]
 
   # An unordered, unfiltered `LIMIT n` is answered by any n rows, so the plan
   # hands DuckDB the fewest sources that hold them (T-449): the sealed tier
@@ -786,15 +810,15 @@ defmodule Smolquery.QueryService.Planner do
     end
   end
 
-  defp manifests(_runtime, [], _tables, _reads_stats?, _page), do: {:ok, %{}}
+  defp manifests(_runtime, [], _tables, _read_opts, _page), do: {:ok, %{}}
 
   # A partitioned table's hot tier lives under several buffer refs
   # (Smolquery.Partitions), so each table expands into its partition refs for
   # the fetch and every page gathers under the parent — the rest of the plan
-  # keeps seeing one hot tier per table. `reads_stats?.(ref)` says whether
-  # the plan can use the entries' flush-time stats; a fetch that cannot
-  # leaves them out. `page` names the one table read newest-first by page.
-  defp manifests(runtime, refs, tables, reads_stats?, page) do
+  # keeps seeing one hot tier per table. `read_opts.(ref)` says whether the
+  # plan can use the entries' flush-time stats, and the snapshot it is pinned
+  # at. `page` names the one table read newest-first by page.
+  defp manifests(runtime, refs, tables, read_opts, page) do
     urls = manifest_urls(runtime)
 
     # The page rides on the paged table's own pairs, not in the task
@@ -815,7 +839,7 @@ defmodule Smolquery.QueryService.Planner do
         fn {parent, partition, url, ref_page} ->
           {parent,
            Trace.span(:manifest_fetch, %{url: url}, fn ->
-             fetch(runtime, parent, partition, url, reads_stats?, ref_page)
+             fetch(runtime, parent, partition, url, read_opts, ref_page)
            end)}
         end,
         ordered: true,
@@ -894,15 +918,16 @@ defmodule Smolquery.QueryService.Planner do
   defp page_for(%{ref: ref} = page, ref), do: page
   defp page_for(_other_or_none, _ref), do: nil
 
-  defp fetch(runtime, parent, partition, url, reads_stats?, page) do
+  defp fetch(runtime, parent, partition, url, read_opts, page) do
     case page do
       %{ref: ^parent} ->
         newest(url, partition, page, runtime.buffer_timeout_ms, nil, 0, [])
 
       _whole ->
-        HotClient.manifest(url, partition,
-          timeout_ms: runtime.buffer_timeout_ms,
-          stats: reads_stats?.(parent)
+        HotClient.manifest(
+          url,
+          partition,
+          [timeout_ms: runtime.buffer_timeout_ms] ++ read_opts.(parent)
         )
     end
   end

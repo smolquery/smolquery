@@ -32,6 +32,14 @@ defmodule Smolquery.BufferService.HotServer do
   whole manifest instead would hand the caller exactly the cost it asked not
   to pay.
 
+  `?snapshot=S` is what a plan pinned at `S` asks with (T-328): an entry whose
+  seal `S` already holds answers as `id`, `sealed_at` and `claim_keys` alone,
+  since the planner will only reject it. A sealed entry stays in the manifest
+  for `retire_grace_ms`, so every plan otherwise pays for rows it cannot read:
+  about 300 ms in a plan over 481 such entries of 105 columns. It answers a
+  whole read only; with `newest`, or as anything but a non-negative integer, it
+  is a `400`.
+
   ## The scoped manifest read, and why it is a POST
 
   The `GET` answers with every micro-segment the node holds for the table. Its
@@ -242,14 +250,19 @@ defmodule Smolquery.BufferService.HotServer do
   end
 
   defp read(manifest, table_ref, :all, opts) do
-    case Keyword.get(opts, :newest) do
-      nil ->
-        HotManifest.entries(manifest, table_ref, :all, stats: Keyword.get(opts, :stats, true))
+    stats = Keyword.get(opts, :stats, true)
 
-      limit ->
+    case {Keyword.get(opts, :newest), Keyword.get(opts, :snapshot)} do
+      {nil, nil} ->
+        HotManifest.entries(manifest, table_ref, :all, stats: stats)
+
+      {nil, snapshot} ->
+        HotManifest.entries_at(manifest, table_ref, snapshot, stats: stats)
+
+      {limit, _no_snapshot} ->
         HotManifest.newest(manifest, table_ref, limit,
           before: Keyword.get(opts, :before),
-          stats: Keyword.get(opts, :stats, true)
+          stats: stats
         )
     end
   end
@@ -274,8 +287,9 @@ defmodule Smolquery.BufferService.HotServer do
 
   defp page_opts(params) do
     with {:ok, newest} <- newest(params["newest"]),
-         {:ok, before} <- before(params["before"], newest) do
-      {:ok, stats: params["stats"] != "false", newest: newest, before: before}
+         {:ok, before} <- before(params["before"], newest),
+         {:ok, snapshot} <- snapshot(params["snapshot"], newest) do
+      {:ok, stats: params["stats"] != "false", newest: newest, before: before, snapshot: snapshot}
     end
   end
 
@@ -293,6 +307,16 @@ defmodule Smolquery.BufferService.HotServer do
 
   defp before(id, _newest),
     do: if(Id.valid?(id), do: {:ok, id}, else: {:error, "before must be a segment id"})
+
+  defp snapshot(nil, _newest), do: {:ok, nil}
+  defp snapshot(_value, newest) when not is_nil(newest), do: {:error, "snapshot excludes newest"}
+
+  defp snapshot(value, nil) do
+    case Integer.parse(value) do
+      {snapshot, ""} when snapshot >= 0 -> {:ok, snapshot}
+      _not_a_version -> {:error, "snapshot must be a non-negative integer"}
+    end
+  end
 
   defp scoped_manifest(conn, name, table_ref) do
     case read_scope(conn) do
@@ -456,6 +480,15 @@ defmodule Smolquery.BufferService.HotServer do
     |> Entry.to_manifest(opts)
     |> Map.put("url", url(entry, conn, runtime, table_ref))
   end
+
+  defp entry_json(
+         %{id: id, sealed_at: sealed_at, claim_keys: keys},
+         _conn,
+         _runtime,
+         _ref,
+         _opts
+       ),
+       do: %{"id" => id, "sealed_at" => sealed_at, "claim_keys" => keys}
 
   defp url(%Entry{} = entry, conn, runtime, {dataset, table}) do
     if Store.shared?(runtime.store) do

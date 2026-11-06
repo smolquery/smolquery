@@ -404,6 +404,58 @@ defmodule Smolquery.QueryService.PlannerTest do
       assert plan.hot[@table] == []
     end
 
+    test "a read at the snapshot still rejects the entry by its claim keys (T-328)" do
+      sealed_path = "/data/sealed/analytics/events/01SEALED.parquet"
+      sealed = %{"claim_keys" => ["analytics/events/01SEALED.parquet"], "sealed_at" => @snapshot}
+
+      runtime =
+        runtime(
+          [entry("01A", sealed), entry("01B")],
+          answers: [segments: %{{@table, @snapshot} => [sealed_path]}]
+        )
+
+      assert {:ok, plan} = Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
+
+      assert ids(plan.hot[@table]) == ["01B"]
+    end
+
+    test "a replica that lags a reduced copy cannot bring its rows back (T-328)" do
+      sealed_path = "/data/sealed/analytics/events/01SEALED.parquet"
+      sealed = %{"claim_keys" => ["analytics/events/01SEALED.parquet"], "sealed_at" => @snapshot}
+
+      for copies <- [[entry("01A"), entry("01A", sealed)], [entry("01A", sealed), entry("01A")]] do
+        runtime =
+          runtime(copies, answers: [segments: %{{@table, @snapshot} => [sealed_path]}])
+
+        assert {:ok, plan} = Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
+
+        assert plan.hot[@table] == []
+      end
+    end
+
+    test "a plan pinned before the seal reads the entry whole (T-328)" do
+      sealed = %{"claim_keys" => ["analytics/events/01SEALED.parquet"], "sealed_at" => @snapshot}
+      runtime = runtime([entry("01A", sealed)], answers: [segments: %{{@table, 3} => []}])
+
+      assert {:ok, plan} =
+               Planner.plan(runtime, @conn, "SELECT * FROM analytics.events", snapshot: 3)
+
+      assert [%{"url" => "http://hot.test/01A.parquet"}] = plan.hot[@table]
+    end
+
+    test "a reduced entry the catalog does not hold fails the plan, never a short answer (T-328)" do
+      runtime =
+        runtime([
+          entry("01A", %{
+            "claim_keys" => ["analytics/events/01SEALED.parquet"],
+            "sealed_at" => @snapshot
+          })
+        ])
+
+      assert {:error, {:hot_tier_unavailable, @table, {:settled_member, ["01A"]}}} =
+               Planner.plan(runtime, @conn, "SELECT * FROM analytics.events")
+    end
+
     test "a claimed entry whose sealed keys are all present at the snapshot is excluded" do
       sealed_path = "/data/sealed/analytics/events/01SEALED.parquet"
 

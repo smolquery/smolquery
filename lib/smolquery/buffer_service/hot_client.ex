@@ -48,6 +48,7 @@ defmodule Smolquery.BufferService.HotClient do
           | {:ids, [String.t()]}
           | {:stats, boolean()}
           | {:before, String.t() | nil}
+          | {:snapshot, non_neg_integer()}
 
   @next_header "x-smolquery-manifest-next"
 
@@ -74,6 +75,11 @@ defmodule Smolquery.BufferService.HotClient do
       read without them goes out as `GET …/manifest?stats=false` (T-449); a
       node from before that parameter ignores it and answers with the stats,
       which costs bytes and nothing else.
+    * `:snapshot` — the catalog version the caller's plan is pinned at, on a
+      whole-manifest read (T-328). An entry whose seal that version holds comes
+      back as `id`, `sealed_at` and `claim_keys` alone, with no `url`, so a
+      caller must apply the membership rule to it and read it no further. A
+      node from before this parameter ignores it and answers every entry whole.
     * `:timeout_ms` — how long to wait for the response.
 
   A scoped read goes out as a `POST`, because 1,024 ULIDs do not fit in a URL.
@@ -130,8 +136,12 @@ defmodule Smolquery.BufferService.HotClient do
   end
 
   defp query(opts) do
-    if is_nil(Keyword.get(opts, :ids)) and Keyword.get(opts, :stats, true) == false,
-      do: "?stats=false",
+    params =
+      List.wrap(if Keyword.get(opts, :stats, true) == false, do: {:stats, false}) ++
+        List.wrap(if snapshot = Keyword.get(opts, :snapshot), do: {:snapshot, snapshot})
+
+    if is_nil(Keyword.get(opts, :ids)) and params != [],
+      do: "?" <> URI.encode_query(params),
       else: ""
   end
 

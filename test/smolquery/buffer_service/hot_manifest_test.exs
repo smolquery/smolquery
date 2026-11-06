@@ -104,6 +104,72 @@ defmodule Smolquery.BufferService.HotManifestTest do
     end
   end
 
+  describe "entries_at/4 (T-328)" do
+    setup(context, do: %{manifest: start_manifest(context, context.local)})
+
+    defp sealed(manifest, rows, key, snapshot) do
+      entry = add(manifest, @table, rows)
+      {:ok, _claim} = HotManifest.claim(manifest, @table, [entry.id], [key])
+      :ok = HotManifest.retire(manifest, @table, [entry.id], snapshot, [key])
+
+      {:ok, sealed} = HotManifest.entry(manifest, @table, entry.id)
+
+      sealed
+    end
+
+    test "reduces an entry whose seal the snapshot holds, and reads the rest whole", %{
+      manifest: manifest
+    } do
+      old_key = "analytics/events/old.parquet"
+      old = sealed(manifest, rows(1), old_key, 4)
+      later = sealed(manifest, rows(2), "analytics/events/later.parquet", 5)
+
+      claimed = add(manifest, @table, rows(3))
+      {:ok, _claim} = HotManifest.claim(manifest, @table, [claimed.id], ["k.parquet"])
+      {:ok, claimed} = HotManifest.entry(manifest, @table, claimed.id)
+
+      unclaimed = add(manifest, @table, rows(4))
+
+      assert HotManifest.entries_at(manifest, @table, 4) == [
+               %{id: old.id, sealed_at: 4, claim_keys: [old_key]},
+               later,
+               claimed,
+               unclaimed
+             ]
+    end
+
+    test "a snapshot before the seal reads the entry whole", %{manifest: manifest} do
+      entry = sealed(manifest, rows(1), "analytics/events/old.parquet", 4)
+
+      assert HotManifest.entries_at(manifest, @table, 3) == [entry]
+    end
+
+    test "a sealed entry with no claim stays whole, since the rule has no keys to reject it by",
+         %{manifest: manifest} do
+      entry = add(manifest, @table, rows(1))
+      :ok = HotManifest.retire(manifest, @table, [entry.id], 4)
+      {:ok, sealed} = HotManifest.entry(manifest, @table, entry.id)
+
+      assert sealed.claim_keys == []
+      assert HotManifest.entries_at(manifest, @table, 4) == [sealed]
+    end
+
+    test "stats: false still applies to what stays whole", %{manifest: manifest} do
+      entry = add(manifest, @table, rows(1))
+
+      assert HotManifest.entries_at(manifest, @table, 4, stats: false) == [%{entry | stats: %{}}]
+    end
+
+    test "reads only the table it is asked for", %{manifest: manifest} do
+      other = {"analytics", "other"}
+      _elsewhere = add(manifest, other, rows(1))
+      entry = sealed(manifest, rows(1), "analytics/events/old.parquet", 4)
+
+      assert [%{id: id}] = HotManifest.entries_at(manifest, @table, 4)
+      assert id == entry.id
+    end
+  end
+
   describe "entries/3" do
     setup(context, do: %{manifest: start_manifest(context, context.local)})
 
