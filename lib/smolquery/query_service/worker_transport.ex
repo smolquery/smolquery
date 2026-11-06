@@ -26,10 +26,13 @@ defmodule Smolquery.QueryService.WorkerTransport do
 
   ## What gen_rpc does not do
 
-  Neither path kills a worker when this caller gives up: gen_rpc cannot, and
-  a direct call has no deadline of its own. The request therefore carries
-  the job's deadline, and `Smolquery.QueryService.PartialWorker` bounds its
-  own query with it, so an abandoned shard costs at most one deadline. The
+  gen_rpc cannot kill a worker when this caller gives up, and a direct call
+  has no deadline of its own. The request therefore carries the job's
+  deadline, and `Smolquery.QueryService.PartialWorker` bounds its own query
+  with it, so an abandoned shard costs at most one deadline. A direct call
+  runs in the shard's task, so when the scatter kills that task the engine's
+  connection dies with it and `Smolquery.Engine.Canceller` stops the statement
+  at once. The
   rpc itself waits that deadline plus a margin, the same rule the buffer
   transport follows.
 

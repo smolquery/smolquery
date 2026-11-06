@@ -38,11 +38,13 @@ defmodule Smolquery.QueryService.Scatter do
      refusal: one machine has no spare CPU for a second engine to use, and
      the fixed costs are the same (T-769). A leased runner is a second
      machine, so one node with runners still scatters, unless the backend
-     is `"local"`, whose runners share this machine. The refusal comes
-     before the job engine plans anything, so a job that stays on one
-     engine pays one catalog read, and a burst refusal it hit is counted
-     by `[:smolquery, :query, :burst_refused]`, since it has no `scatter`
-     to carry it.
+     is `"local"`, whose runners share this machine. One node with no
+     machine to lease refuses before anything else, and one that leases
+     them judges an `:auto` job from the plan's own sealed bytes, so the
+     common small query pays neither the job engine's planning nor a
+     catalog read. A job left on one engine has no `scatter` to carry a
+     burst refusal, so `[:smolquery, :query, :burst_refused]` counts it,
+     when it asked for more than the node could give.
      Dispatch goes through `Smolquery.QueryService.WorkerTransport`: a
      direct call for this node, gen_rpc on its own sockets for a peer
      (T-364), a task placed on a leased runner with a self-contained request
@@ -50,7 +52,8 @@ defmodule Smolquery.QueryService.Scatter do
      deadline. A runner shard that fails, at the lease or on the runner, is
      retried once on a peer while more than the retry floor of the deadline
      remains (`Smolquery.Burst.Policy`); otherwise the job falls back. With
-     a single peer it falls back at once: every failed runner's retry would
+     a single peer it falls back at once, and counts `runners_unreachable`
+     if the runner could not be reached: every failed runner's retry would
      land on that one machine, up to `max_inflight` engines at a time.
   4. Each shard decides for itself whether to read through its node's file
      cache (T-630): the request carries the job's cache mode, not the
@@ -110,8 +113,11 @@ defmodule Smolquery.QueryService.Scatter do
      peer, is retried once on a peer, another than the one it failed on
      when there is one, while the retry floor of the deadline remains
      (T-703): a peer merge shard spills through its own store, so a peer
-     answers a merge as a runner would. A level waits for every shard's
-     reply, so the coordinator kills no merge shard for another's error.
+     answers a merge as a runner would. A runner merge shard with a single
+     peer is not retried, for the reason a runner scan shard is not
+     (T-769), and leaves its inputs to the coordinator. A level waits for
+     every shard's reply, so the coordinator kills no merge shard for
+     another's error.
      A shard that failed twice leaves only its own inputs to the
      coordinator, and its spill key is deleted; the shards that answered
      are kept, since the final re-aggregates whatever it reads. So the
@@ -258,14 +264,14 @@ defmodule Smolquery.QueryService.Scatter do
   end
 
   defp attempt(runtime, connection, plan, job_id, timeout_ms, outputs) do
-    with :ok <- second_machine(runtime),
+    with :ok <- second_machine(runtime, plan),
          {:ok, ref} <- single_table(plan),
          {:ok, schema} <- planned_schema(plan, ref),
-         {:ok, units} <- units(runtime, plan, ref),
-         {:ok, dealt} <- shards(runtime, units),
          {:ok, outputs} <- describe(connection, plan, outputs),
          {:ok, decomposition} <- decompose(connection, plan, outputs, schema),
-         :ok <- value_lists(runtime, plan, decomposition) do
+         :ok <- value_lists(runtime, plan, decomposition),
+         {:ok, units} <- units(runtime, plan, ref),
+         {:ok, dealt} <- shards(runtime, units) do
       run(runtime, connection, decomposition, ref, schema, dealt, job_id, timeout_ms)
     else
       {:refused, reason} ->
@@ -292,21 +298,37 @@ defmodule Smolquery.QueryService.Scatter do
   defp describe(connection, %Plan{} = plan, nil),
     do: Connection.describe(connection, plan.canonical_sql, plan.params, :infinity)
 
-  defp second_machine(%Runtime{burst: %{request: request} = burst} = runtime) do
+  defp second_machine(%Runtime{burst: burst} = runtime, plan) do
     cond do
-      request not in [false, 0] and leases_machines?(burst) ->
-        :ok
-
       several_workers?(runtime) ->
         :ok
 
-      true ->
-        if match?({:none, :no_pool}, Policy.runners(request, 0, burst)),
-          do: count_burst_refused(:no_pool)
+      leases_machines?(burst) ->
+        runners_in_reach(burst, plan)
 
+      true ->
+        count_burst_refused(one_machine_refusal(burst))
         {:refused, :one_node}
     end
   end
+
+  defp runners_in_reach(%{request: request}, _plan) when request in [false, 0],
+    do: {:refused, :one_node}
+
+  defp runners_in_reach(burst, %Plan{statistics: %Statistics{sealed: %{file_bytes: bytes}}}) do
+    case Policy.runners(burst.request, bytes, burst) do
+      {:ok, _runners} -> :ok
+      {:none, _under_threshold} -> {:refused, :one_node}
+    end
+  end
+
+  defp runners_in_reach(_burst, _unsized_plan), do: :ok
+
+  defp one_machine_refusal(%{enabled: enabled, request: request})
+       when is_integer(request) and request > 0,
+       do: if(enabled, do: :same_machine, else: :no_pool)
+
+  defp one_machine_refusal(_burst), do: nil
 
   defp leases_machines?(%{enabled: true, backend: backend}), do: backend != "local"
   defp leases_machines?(_burst), do: false
@@ -375,19 +397,27 @@ defmodule Smolquery.QueryService.Scatter do
       if length(units) >= runtime.distributed.min_files do
         {:ok, units}
       else
-        {:refused, {:too_few_files, length(units)}}
+        too_few_units(runtime, units)
       end
     end
   end
+
+  defp too_few_units(%Runtime{burst: burst}, units) do
+    if match?({:ok, _runners}, Policy.runners(burst.request, sealed_bytes(units), burst)),
+      do: count_burst_refused(:too_few_files)
+
+    {:refused, {:too_few_files, length(units)}}
+  end
+
+  defp sealed_bytes(units),
+    do: units |> Enum.reject(&hot?/1) |> Enum.sum_by(&Map.get(&1, "bytes", 0))
 
   defp default_scan(%{default: :file}, %{bytes: bytes}), do: bytes
   defp default_scan(%{default: none}, _file), do: none
 
   defp shards(runtime, units) do
-    file_bytes = units |> Enum.reject(&hot?/1) |> Enum.sum_by(&Map.get(&1, "bytes", 0))
-
     {runners, refused} =
-      case Policy.runners(runtime.burst.request, file_bytes, runtime.burst) do
+      case Policy.runners(runtime.burst.request, sealed_bytes(units), runtime.burst) do
         {:ok, runners} -> {runners, nil}
         {:none, :off} -> {0, nil}
         {:none, reason} -> {0, reason}
@@ -516,6 +546,7 @@ defmodule Smolquery.QueryService.Scatter do
 
         {:error, reason} ->
           sweep_spills(runtime, job_id, spill_keys(runtime, dealt, job_id))
+          count_runner_outage(context, reason)
           Logger.warning("distributed query fell back: #{inspect(reason)}")
 
           :fallback
@@ -528,6 +559,11 @@ defmodule Smolquery.QueryService.Scatter do
       File.rm_rf(partials_dir)
     end
   end
+
+  defp count_runner_outage(%{peers: [_only_peer]}, {:worker_unreachable, {:runner, _pool}, _why}),
+    do: count_burst_refused(:runners_unreachable)
+
+  defp count_runner_outage(_context, _reason), do: :ok
 
   defp answer(runtime, connection, decomposition, dealt, partials, {inputs, consumed}, job_id) do
     merged =
@@ -972,8 +1008,8 @@ defmodule Smolquery.QueryService.Scatter do
     end
   end
 
-  defp retry_target(%{merge: _level} = target, context), do: other_peer(target, context)
   defp retry_target(%{kind: :runner}, %{peers: [_only_peer]}), do: nil
+  defp retry_target(%{merge: _level} = target, context), do: other_peer(target, context)
   defp retry_target(%{kind: :runner} = target, context), do: other_peer(target, context)
   defp retry_target(_scan_on_a_peer, _context), do: nil
 

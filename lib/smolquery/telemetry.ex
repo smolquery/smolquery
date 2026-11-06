@@ -582,9 +582,9 @@ defmodule Smolquery.Telemetry do
         "worker: the lease, the boot when the pool grew, and the wire (PL-77).",
     "smolquery_query_burst_refused_total" =>
       "Queries that asked for burst and got no runner, by reason: under_threshold, no_pool, " <>
-        "too_few_files, or runners_unreachable (PL-77). A scattered query counts here, and so " <>
-        "does any query a refusal left on one engine on one query node, whether or not it " <>
-        "would have decomposed (T-769).",
+        "same_machine, too_few_files, or runners_unreachable (PL-77). A scattered query counts " <>
+        "here. A query left on one engine counts when it asked for more than the node could " <>
+        "give; auto under the threshold on one query node does not (T-769).",
     "smolquery_burst_boots_total" =>
       "Runners the burst pool booted, by outcome: ok when the runner connected, error when " <>
         "the boot failed or timed out (PL-77).",
@@ -1269,7 +1269,13 @@ defmodule Smolquery.Telemetry do
   def handle_event(_event, _measurements, _meta, nil), do: :ok
 
   defp burst_refused_reason(reason)
-       when reason in [:under_threshold, :no_pool, :too_few_files, :runners_unreachable],
+       when reason in [
+              :under_threshold,
+              :no_pool,
+              :same_machine,
+              :too_few_files,
+              :runners_unreachable
+            ],
        do: reason
 
   defp burst_refused_reason(_none_or_unknown), do: nil

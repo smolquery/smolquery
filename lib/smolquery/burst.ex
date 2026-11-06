@@ -27,8 +27,9 @@ defmodule Smolquery.Burst do
         idle_shutdown_after_ms: 15_000,
         call_timeout_ms: 600_000
 
-  `backend` is `:local` (`FLAME.LocalBackend`, for tests and development),
-  a module that implements `FLAME.Backend` (`Smolquery.Burst.LambdaBackend`
+  `backend` is `:local` (`FLAME.LocalBackend`, for tests and development,
+  which needs a second query node to scatter at all, see below), a module
+  that implements `FLAME.Backend` (`Smolquery.Burst.LambdaBackend`
   is the one built here), or `{module, opts}` as `FLAME.Pool` takes it. `max` bounds the runners this node may hold at
   once; it is per node, not per deployment. Each runner takes one shard at
   a time (`max_concurrency: 1`): a shard is one DuckDB engine that uses the

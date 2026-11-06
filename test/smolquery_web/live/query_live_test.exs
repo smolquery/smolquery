@@ -90,7 +90,7 @@ defmodule SmolqueryWeb.QueryLiveTest do
     end
 
     test "typing patches the sql into the URL", %{conn: conn} do
-      start_web!()
+      start_web!(query_name: start_query!(distributed: [local_workers: 2]))
 
       {:ok, lv, _html} = live(conn, ~p"/query")
 
@@ -103,7 +103,7 @@ defmodule SmolqueryWeb.QueryLiveTest do
     end
 
     test "clearing the editor drops the sql from the URL", %{conn: conn} do
-      start_web!()
+      start_web!(query_name: start_query!(distributed: [local_workers: 2]))
 
       {:ok, lv, _html} = live(conn, ~p"/query?#{[sql: "SELECT 1"]}")
 
@@ -116,7 +116,7 @@ defmodule SmolqueryWeb.QueryLiveTest do
     end
 
     test "a query too long for the link stays out of it and says so", %{conn: conn} do
-      start_web!()
+      start_web!(query_name: start_query!(distributed: [local_workers: 2]))
 
       {:ok, lv, _html} = live(conn, ~p"/query")
 
@@ -299,6 +299,22 @@ defmodule SmolqueryWeb.QueryLiveTest do
 
       assert html =~ ~s|name="query[distributed]"|
       assert html =~ "checked"
+    end
+
+    test "a hidden distribute toggle stays out of the URL and leaves the choice alone (T-769)", %{
+      conn: conn,
+      query: query
+    } do
+      start_web!(query_name: query)
+
+      {:ok, lv, _html} = live(conn, ~p"/query")
+
+      render_change(lv, "sql_changed", %{"query" => %{"sql" => "SELECT 1", "trace" => "true"}})
+
+      assert assert_patch(lv) ==
+               ~p"/query?#{[sql: "SELECT 1", trace: "true", file_cache: "auto"]}"
+
+      assert :sys.get_state(lv.pid).socket.assigns.distributed
     end
 
     test "the distribute toggle stays hidden on one query node with no runners (T-769)", %{
