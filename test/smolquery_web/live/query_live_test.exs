@@ -5,6 +5,19 @@ defmodule SmolqueryWeb.QueryLiveTest do
   alias Smolquery.Test.Eventually
   alias Smolquery.Test.FixedCatalog
 
+  defp start_query!(opts) do
+    query = :"web_query_#{:erlang.unique_integer([:positive])}"
+    catalog = FixedCatalog.new(%{snapshot: 1, schemas: %{}, segments: %{}})
+
+    start_supervised!(
+      {QueryService.Supervisor, [name: query, catalog: catalog] ++ opts},
+      id: query
+    )
+
+    on_exit(fn -> QueryService.Runtime.delete(query) end)
+    query
+  end
+
   describe "without a query service" do
     test "renders the editor", %{conn: conn} do
       start_web!()
@@ -54,10 +67,11 @@ defmodule SmolqueryWeb.QueryLiveTest do
     end
 
     test "trace=false and distributed=false uncheck the toggles", %{conn: conn} do
-      start_web!()
+      start_web!(query_name: start_query!(distributed: [local_workers: 2]))
 
       {:ok, _lv, html} = live(conn, ~p"/query?#{[trace: "false", distributed: "false"]}")
 
+      assert html =~ ~s|name="query[distributed]"|
       refute html =~ "checked"
     end
 
@@ -232,21 +246,15 @@ defmodule SmolqueryWeb.QueryLiveTest do
 
     test "on a node that leases runners the burst toggle and nodes field render and survive the URL (T-679)",
          %{conn: conn} do
-      query = :"web_query_burst_#{:erlang.unique_integer([:positive])}"
+      pool = :"web_burst_pool_#{:erlang.unique_integer([:positive])}"
 
-      start_supervised!(
-        {QueryService.Supervisor,
-         name: query,
-         catalog: FixedCatalog.new(%{snapshot: 1, schemas: %{}, segments: %{}}),
-         burst: [enabled: true, pool: :"web_burst_pool_#{:erlang.unique_integer([:positive])}"]},
-        id: query
+      start_web!(
+        query_name: start_query!(burst: [enabled: true, pool: pool, backend_name: "lambda"])
       )
-
-      on_exit(fn -> QueryService.Runtime.delete(query) end)
-      start_web!(query_name: query)
 
       {:ok, lv, html} = live(conn, ~p"/query?#{[burst: "false", burst_nodes: "4"]}")
 
+      assert html =~ ~s|name="query[distributed]"|
       assert html =~ ~s|name="query[burst]"|
       assert html =~ ~s|name="query[burst_nodes]"|
       assert html =~ ~s|value="4"|
@@ -285,12 +293,36 @@ defmodule SmolqueryWeb.QueryLiveTest do
     end
 
     test "the distribute toggle starts enabled", %{conn: conn} do
-      start_web!()
+      start_web!(query_name: start_query!(distributed: [local_workers: 2]))
 
       {:ok, _lv, html} = live(conn, ~p"/query?#{[trace: "false"]}")
 
       assert html =~ ~s|name="query[distributed]"|
       assert html =~ "checked"
+    end
+
+    test "the distribute toggle stays hidden on one query node with no runners (T-769)", %{
+      conn: conn,
+      query: query
+    } do
+      start_web!(query_name: query)
+
+      {:ok, _lv, html} = live(conn, ~p"/query")
+
+      refute html =~ ~s|name="query[distributed]"|
+    end
+
+    test "one query node whose runners share its machine offers neither toggle (T-769)", %{
+      conn: conn
+    } do
+      pool = :"web_burst_pool_#{:erlang.unique_integer([:positive])}"
+      query = start_query!(burst: [enabled: true, pool: pool, backend_name: "local"])
+      start_web!(query_name: query)
+
+      {:ok, _lv, html} = live(conn, ~p"/query")
+
+      refute html =~ ~s|name="query[distributed]"|
+      refute html =~ ~s|name="query[burst]"|
     end
 
     test "a traced run renders a waterfall", %{conn: conn, query: query} do

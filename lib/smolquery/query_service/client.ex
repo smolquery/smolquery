@@ -37,6 +37,7 @@ defmodule Smolquery.QueryService.Client do
   alias Smolquery.QueryService.Job
   alias Smolquery.QueryService.Runner
   alias Smolquery.QueryService.Runtime
+  alias Smolquery.QueryService.Scatter
   alias Smolquery.Segments.Store
   alias Smolquery.Tracing
 
@@ -255,6 +256,19 @@ defmodule Smolquery.QueryService.Client do
   def burst_enabled?(name) do
     case runtime(name) do
       {:ok, runtime} -> runtime.burst.enabled
+      {:error, :query_service_unavailable} -> false
+    end
+  end
+
+  @doc """
+  Whether a job on this node can scatter at all
+  (`Smolquery.QueryService.Scatter.second_machine?/1`), so a UI knows whether
+  to offer it (T-769). `false` when the service is not running here.
+  """
+  @spec scatter_available?(atom()) :: boolean()
+  def scatter_available?(name) do
+    case runtime(name) do
+      {:ok, runtime} -> Scatter.second_machine?(runtime)
       {:error, :query_service_unavailable} -> false
     end
   end

@@ -216,7 +216,7 @@ defmodule SmolqueryVictoriaMetrics.SamplesTest do
     end
 
     test "the grouped query is one job that is not scattered", context do
-      stack = VictoriaMetricsStack.start(context)
+      stack = VictoriaMetricsStack.start(context, query_opts: [distributed: [local_workers: 2]])
 
       for block <- 0..9 do
         :ok =
