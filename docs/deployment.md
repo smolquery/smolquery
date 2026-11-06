@@ -866,8 +866,12 @@ Each whole-manifest read now carries `?snapshot=S`, and the buffer reduces the
 entries whose seal `S` already holds to `id`, `sealed_at` and `claim_keys`. The
 order of a rollout does not matter. A buffer node from before this release
 ignores the parameter and answers every entry whole, which costs bytes and
-nothing else, and a query node from before it never asks. Upgrade buffer nodes
-to get the saving.
+nothing else, and a query node from before it never asks. The saving needs both
+buffer and query nodes on this release.
+
+A new warning, `hot manifest stamp and catalog disagree`, means an entry outlived
+`SMOLQUERY_SNAPSHOT_KEEP_MS` or the catalog was restored from a backup. The query
+still answers, at the old cost, so look at why the reaper has not removed the entry.
 
 ### The query planner reads the hot manifest without stats when it cannot prune (T-449)
 

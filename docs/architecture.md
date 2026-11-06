@@ -541,10 +541,11 @@ GET  /v1/datasets/:dataset/tables/:table/segments/:id.parquet     # segment byte
   It is reduced rather than left out because a replica can lag its owner: the
   planner keeps the copy furthest along the handoff, so a missing owner copy
   would let a laggard's unclaimed copy count its rows twice. The membership
-  rule still decides on the claim keys, and a reduced entry it keeps fails the
-  plan. Measured on one node over 105 columns, a prunable query spent 254–351 ms
-  in this fetch with 481 sealed entries, and 9–13 ms with 540 once it read at
-  the snapshot.
+  rule still decides on the claim keys. If it keeps a reduced entry, because
+  snapshot expiry or a restored catalog took its key away, the plan logs the
+  ids and reads the manifest whole. Measured on one node over 105 columns, a
+  prunable query spent 254–351 ms in this fetch with 481 sealed entries, and
+  9–13 ms with 540 once it read at the snapshot.
 - **The preview reads the newest entries by page.** An unordered `LIMIT n`
   is answered by the newest micro-segments holding n rows, and the planner
   used to fetch the whole manifest to find them — 285,000 entries per buffer

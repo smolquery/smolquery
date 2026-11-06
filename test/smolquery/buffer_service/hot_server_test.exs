@@ -199,6 +199,16 @@ defmodule Smolquery.BufferService.HotServerTest do
         assert get(name, @manifest_path <> query).status == 400
       end
     end
+
+    test "a list or a map where a number belongs is a 400, not a crash", context do
+      name = start_buffer_service(context)
+
+      for query <- ["?snapshot[]=4", "?snapshot[a]=1", "?newest[]=2", "?newest[a]=2"] do
+        assert get(name, @manifest_path <> query).status == 400
+      end
+
+      assert get(name, @manifest_path <> "?newest=2&before[]=x").status == 400
+    end
   end
 
   describe "newest-first page (T-449)" do

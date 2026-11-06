@@ -296,7 +296,7 @@ defmodule Smolquery.BufferService.HotServer do
   defp newest(nil), do: {:ok, nil}
 
   defp newest(value) do
-    case Integer.parse(value) do
+    case integer_param(value) do
       {limit, ""} when limit > 0 -> {:ok, limit}
       _not_a_count -> {:error, "newest must be a positive integer"}
     end
@@ -312,11 +312,14 @@ defmodule Smolquery.BufferService.HotServer do
   defp snapshot(_value, newest) when not is_nil(newest), do: {:error, "snapshot excludes newest"}
 
   defp snapshot(value, nil) do
-    case Integer.parse(value) do
+    case integer_param(value) do
       {snapshot, ""} when snapshot >= 0 -> {:ok, snapshot}
       _not_a_version -> {:error, "snapshot must be a non-negative integer"}
     end
   end
+
+  defp integer_param(value) when is_binary(value), do: Integer.parse(value)
+  defp integer_param(_list_or_map), do: :error
 
   defp scoped_manifest(conn, name, table_ref) do
     case read_scope(conn) do

@@ -121,8 +121,9 @@ defmodule Smolquery.Telemetry do
                                           it still describes; `bytes_before - bytes_after`
                                           is the dead history reclaimed (T-319)
       [:smolquery, :hot_manifest, :read]  %{duration_us, entries},
-                                          meta %{op: :entries | :pending | :claimable |
-                                          :live_claim | :retired_before, manifest: table}
+                                          meta %{op: :entries | :entries_at | :newest |
+                                          :pending | :claimable | :live_claim |
+                                          :retired_before, manifest: table}
                                           — one scanning read of a node's manifest index,
                                           whoever made it (T-318); `manifest` is the
                                           index table read, so a handler on a node with
