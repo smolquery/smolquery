@@ -178,13 +178,15 @@ defmodule Smolquery.QueryService.Runtime do
   `row_partial_max_rows` is the largest `LIMIT n` a sampled subquery may
   have and still scatter (T-540): every shard ships up to `n` rows.
   `local_workers`
-  is how many instances run on this node when clustering is off; with
+  is how many instances run on this node when clustering is off, `1` by
+  default: fewer than two targets never scatters, so one query node answers
+  on one engine (T-769), and only a test or a bench sets more. With
   clustering on, the workers are the group's member nodes. Each worker
   engine takes `worker_memory_limit` (default: `job_memory_limit`, whole)
   and `worker_threads` (default: `read_engine_threads`) — like the write
-  pool, nothing divides a size string for you, so a node's declared scatter
-  budget is `local_workers ×` the worker limit *on top of* the job engine's
-  own. Decomposition, dispatch, and fallback live in
+  pool, nothing divides a size string for you, so a scatter's declared
+  budget on a node is its workers there `×` the worker limit *on top of* the
+  job engine's own. Decomposition, dispatch, and fallback live in
   `Smolquery.QueryService.Scatter`.
 
   `burst` (PL-77) is whether a scattered job may also fan out to runners
@@ -255,7 +257,7 @@ defmodule Smolquery.QueryService.Runtime do
       min_files: 8,
       value_list_max_rows: 50_000_000,
       row_partial_max_rows: 10_000_000,
-      local_workers: 4,
+      local_workers: 1,
       worker_memory_limit: nil,
       worker_threads: nil
     },
@@ -468,7 +470,7 @@ defmodule Smolquery.QueryService.Runtime do
       min_files: Keyword.get(opts, :min_files, 8),
       value_list_max_rows: Keyword.get(opts, :value_list_max_rows, 50_000_000),
       row_partial_max_rows: Keyword.get(opts, :row_partial_max_rows, 10_000_000),
-      local_workers: Keyword.get(opts, :local_workers, 4),
+      local_workers: Keyword.get(opts, :local_workers, 1),
       worker_memory_limit: Keyword.get(opts, :worker_memory_limit),
       worker_threads: Keyword.get(opts, :worker_threads)
     }

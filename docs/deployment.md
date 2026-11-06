@@ -271,6 +271,16 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### Unreleased: one query node never scatters (T-769)
+
+**TL;DR.** A node that is the only query node now answers on one engine, instead of splitting a query into 4 local workers. Most queries get faster, and `SMOLQUERY_DISTRIBUTED_LOCAL_WORKERS` is gone.
+
+- **Why.** Those 4 workers and the job engine shared one machine, so they had no extra CPU to use. Each one took the whole thread count and the whole `SMOLQUERY_JOB_MEMORY_LIMIT`. In the bench-matrix ClickBench runs, Q1 took 382 to 516 ms on one engine and 1,262 to 2,134 ms over four.
+- **`SMOLQUERY_DISTRIBUTED_LOCAL_WORKERS`.** The node now ignores it. Remove it from your configuration.
+- **A job's `"distributed": true`.** It no longer forces a scatter on one query node. The job answers on one engine, with `"scatter": null`.
+- **Burst.** A leased runner is a second machine, so one node with runners still scatters.
+- **More than one query node.** Nothing changes.
+
 ### Unreleased: a table change during a node's boot no longer answers 500 (T-767)
 
 **TL;DR.** A node answers `/healthz` before its ingest service has finished starting. A `CREATE TABLE` in that window answered 500, after the catalog had already created the table. It now succeeds, and an insert in the same window answers 503 `UNAVAILABLE` instead of 500. Nothing to change on upgrade.

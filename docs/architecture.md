@@ -1218,12 +1218,18 @@ scan answered, fallbacks included. It is on by default;
 `SMOLQUERY_DISTRIBUTED_QUERY=false` is the kill switch, and a job's own
 `distributed` option overrides either way.
 
-**Where the workers are.** Without clustering, `local_workers` engines run
-on the node itself. With clustering on, the workers are the nodes that hold
+**Where the workers are.** The workers are the nodes that hold
 the `:query` role — the members of the query service's own `:pg` group, the
 same membership mechanism the buffer and storage rings use, with no per-query
 probing. The split is the scan only: the coordinator is always the node that
 received the request, because `Smolquery.QueryService.Client` is node-local.
+
+**One query node never scatters (T-769).** A second engine on the same machine
+has no spare CPU to use, and it still pays the fixed costs: in the
+bench-matrix ClickBench runs, Q1 took 382 to 516 ms on one engine and 1,262 to
+2,134 ms over four.
+This holds whatever a job's `distributed` option says. A leased burst runner
+is a second machine, so one node with runners still scatters.
 
 What the spike measured (PL-48, `bench/results/distributed_query.md`): at a
 constant thread budget, K instances match one instance on every shape and

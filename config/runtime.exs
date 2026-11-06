@@ -851,8 +851,9 @@ end
 
 # Distributed queries (PL-49) are on by default: a decomposable aggregate
 # query scatters its file list across several DuckDB instances — the query
-# service's group members when clustering is on,
-# `SMOLQUERY_DISTRIBUTED_LOCAL_WORKERS` local instances when it is off.
+# service's group members, or leased burst runners. One query node with no
+# runners never scatters, whatever a job asks: one machine has no spare CPU
+# for a second engine to use (T-769).
 # `SMOLQUERY_DISTRIBUTED_QUERY=false` is the kill switch; a job's own
 # `distributed` option overrides either way. A query under
 # `SMOLQUERY_DISTRIBUTED_MIN_FILES` shardable files, or one that does not
@@ -869,7 +870,6 @@ distributed_query =
       {"SMOLQUERY_DISTRIBUTED_MIN_FILES", :min_files, :positive_integer},
       {"SMOLQUERY_DISTRIBUTED_VALUE_LIST_MAX_ROWS", :value_list_max_rows, :positive_integer},
       {"SMOLQUERY_DISTRIBUTED_ROW_PARTIAL_MAX_ROWS", :row_partial_max_rows, :positive_integer},
-      {"SMOLQUERY_DISTRIBUTED_LOCAL_WORKERS", :local_workers, :positive_integer},
       {"SMOLQUERY_DISTRIBUTED_WORKER_MEMORY_LIMIT", :worker_memory_limit, :string},
       {"SMOLQUERY_DISTRIBUTED_WORKER_THREADS", :worker_threads, :positive_integer}
     ],
