@@ -860,6 +860,15 @@ attempt — 250 ms, doubling per consecutive failure up to `seal_retry_ms`
 (default 30 s) — so a refusal nobody anticipated costs one warning per
 interval, not one per flush. Both are owner-side; no protocol changes.
 
+### The query planner tells the buffer its snapshot (T-328)
+
+Each whole-manifest read now carries `?snapshot=S`, and the buffer reduces the
+entries whose seal `S` already holds to `id`, `sealed_at` and `claim_keys`. The
+order of a rollout does not matter. A buffer node from before this release
+ignores the parameter and answers every entry whole, which costs bytes and
+nothing else, and a query node from before it never asks. Upgrade buffer nodes
+to get the saving.
+
 ### The query planner reads the hot manifest without stats when it cannot prune (T-449)
 
 A plan with no WHERE conjunct and no Top-N bound on a table now fetches that

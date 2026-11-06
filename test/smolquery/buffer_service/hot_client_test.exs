@@ -4,6 +4,7 @@ defmodule Smolquery.BufferService.HotClientTest do
   alias Smolquery.BufferService
   alias Smolquery.BufferService.Client
   alias Smolquery.BufferService.HotClient
+  alias Smolquery.BufferService.HotManifest
   alias Smolquery.BufferService.HotServer
   alias Smolquery.Schema
 
@@ -94,6 +95,42 @@ defmodule Smolquery.BufferService.HotClientTest do
       assert Enum.count(entries) == 2
       refute Enum.any?(entries, &Map.has_key?(&1, "stats"))
       assert Enum.any?(entries, &(&1["id"] == ack.segment_id))
+    end
+
+    test "a snapshot reaches the node on a whole-manifest read, alone or beside stats (T-328)",
+         context do
+      buffer = start_buffer(context)
+      {:ok, ack} = Client.write_batch(buffer, @table, batch(1..3))
+      {:ok, runtime} = BufferService.Runtime.fetch(buffer)
+      key = "analytics/events/#{ack.segment_id}.parquet"
+      {:ok, _claim} = HotManifest.claim(runtime.manifest, @table, [ack.segment_id], [key])
+      :ok = HotManifest.retire(runtime.manifest, @table, [ack.segment_id], 4, [key])
+      reduced = %{"id" => ack.segment_id, "sealed_at" => 4, "claim_keys" => [key]}
+      base_url = HotServer.base_url(buffer)
+
+      assert HotClient.manifest(base_url, @table, snapshot: 4) == {:ok, [reduced]}
+      assert HotClient.manifest(base_url, @table, snapshot: 4, stats: false) == {:ok, [reduced]}
+
+      assert {:ok, [whole]} = HotClient.manifest(base_url, @table, snapshot: 3, stats: false)
+      assert whole["row_count"] == 3
+      refute Map.has_key?(whole, "stats")
+    end
+
+    test "a scoped read ignores a snapshot and answers its ids whole", context do
+      buffer = start_buffer(context)
+      {:ok, ack} = Client.write_batch(buffer, @table, batch(1..3))
+      {:ok, runtime} = BufferService.Runtime.fetch(buffer)
+      key = "analytics/events/#{ack.segment_id}.parquet"
+      {:ok, _claim} = HotManifest.claim(runtime.manifest, @table, [ack.segment_id], [key])
+      :ok = HotManifest.retire(runtime.manifest, @table, [ack.segment_id], 4, [key])
+
+      assert {:ok, [entry]} =
+               HotClient.manifest(HotServer.base_url(buffer), @table,
+                 ids: [ack.segment_id],
+                 snapshot: 4
+               )
+
+      assert entry["row_count"] == 3
     end
 
     test "an id the node no longer holds is absent from a scoped read", context do

@@ -28,6 +28,8 @@ defmodule Smolquery.Test.ManifestServer do
         do: Enum.map(entries, &Map.delete(&1, "stats")),
         else: entries
 
+    entries = settled(entries, params["snapshot"])
+
     conn
     |> continue(next)
     |> put_resp_content_type("application/json")
@@ -49,6 +51,23 @@ defmodule Smolquery.Test.ManifestServer do
       |> Enum.take(limit)
 
     {page, if(length(page) == limit, do: List.last(page)["id"])}
+  end
+
+  # `?snapshot=S` reduces an entry stamped at or before `S`, as `HotServer` does
+  # (T-328).
+  defp settled(entries, nil), do: entries
+
+  defp settled(entries, snapshot) do
+    snapshot = String.to_integer(snapshot)
+
+    Enum.map(entries, fn
+      %{"sealed_at" => sealed_at, "claim_keys" => [_ | _]} = entry
+      when is_integer(sealed_at) and sealed_at <= snapshot ->
+        Map.take(entry, ["id", "sealed_at", "claim_keys"])
+
+      entry ->
+        entry
+    end)
   end
 
   defp continue(conn, nil), do: conn

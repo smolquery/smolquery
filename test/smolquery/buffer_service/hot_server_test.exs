@@ -137,6 +137,70 @@ defmodule Smolquery.BufferService.HotServerTest do
     end
   end
 
+  describe "a read at a snapshot (T-328)" do
+    defp seal_at(name, segment_id, snapshot) do
+      {:ok, runtime} = Runtime.fetch(name)
+      key = "analytics/events/#{segment_id}.parquet"
+      {:ok, _claim} = HotManifest.claim(runtime.manifest, @table, [segment_id], [key])
+      :ok = HotManifest.retire(runtime.manifest, @table, [segment_id], snapshot, [key])
+
+      key
+    end
+
+    test "reduces an entry whose seal the snapshot holds, and serves the rest whole", context do
+      name = start_buffer_service(context)
+      {:ok, old} = Client.write_batch(name, @table, batch(1..1))
+      {:ok, live} = Client.write_batch(name, @table, batch(2..2))
+      key = seal_at(name, old.segment_id, 4)
+
+      assert [reduced, whole] =
+               get(name, @manifest_path <> "?snapshot=4").resp_body |> JSON.decode!()
+
+      assert reduced == %{"id" => old.segment_id, "sealed_at" => 4, "claim_keys" => [key]}
+      assert whole["id"] == live.segment_id
+      assert whole["url"] =~ segment_path(live.segment_id)
+      assert Map.has_key?(whole, "stats")
+    end
+
+    test "serves the entry whole at a snapshot before its seal", context do
+      name = start_buffer_service(context)
+      {:ok, ack} = Client.write_batch(name, @table, batch(1..1))
+      _key = seal_at(name, ack.segment_id, 4)
+
+      assert [entry] = get(name, @manifest_path <> "?snapshot=3").resp_body |> JSON.decode!()
+      assert entry["url"] =~ segment_path(ack.segment_id)
+      assert entry["sealed_at"] == 4
+    end
+
+    test "combines with stats=false", context do
+      name = start_buffer_service(context)
+      {:ok, _ack} = Client.write_batch(name, @table, batch(1..1))
+
+      assert [entry] =
+               get(name, @manifest_path <> "?snapshot=4&stats=false").resp_body |> JSON.decode!()
+
+      refute Map.has_key?(entry, "stats")
+      assert entry["row_count"] == 1
+    end
+
+    test "a read without a snapshot serves a sealed entry whole", context do
+      name = start_buffer_service(context)
+      {:ok, ack} = Client.write_batch(name, @table, batch(1..1))
+      _key = seal_at(name, ack.segment_id, 4)
+
+      assert [entry] = get(name, @manifest_path).resp_body |> JSON.decode!()
+      assert entry["url"] =~ segment_path(ack.segment_id)
+    end
+
+    test "a snapshot that is not a version, or that comes with newest, is a 400", context do
+      name = start_buffer_service(context)
+
+      for query <- ["?snapshot=-1", "?snapshot=abc", "?snapshot=1.5", "?snapshot=4&newest=2"] do
+        assert get(name, @manifest_path <> query).status == 400
+      end
+    end
+  end
+
   describe "newest-first page (T-449)" do
     defp three_segments(name) do
       acks = for n <- 1..3, do: elem(Client.write_batch(name, @table, batch(n..n)), 1)

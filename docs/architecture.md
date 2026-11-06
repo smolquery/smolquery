@@ -534,6 +534,17 @@ GET  /v1/datasets/:dataset/tables/:table/segments/:id.parquet     # segment byte
   `{"ids": [...], "stats": false}`, and pays for its claim rather than for the
   backlog it is draining (T-316). It is a `POST` because 1,024 ULIDs are about
   28 KB of request line. Nothing about the node's state changes either way.
+- **A plan says which snapshot it reads** (T-328). A sealed entry stays in the
+  manifest for `retire_grace_ms`, and a query at or after its seal only rejects
+  it. So the planner fetches `GET …?snapshot=S`, and an entry with a claim and
+  a `sealed_at` at or before `S` answers as `id`, `sealed_at` and `claim_keys`.
+  It is reduced rather than left out because a replica can lag its owner: the
+  planner keeps the copy furthest along the handoff, so a missing owner copy
+  would let a laggard's unclaimed copy count its rows twice. The membership
+  rule still decides on the claim keys, and a reduced entry it keeps fails the
+  plan. Measured on one node over 105 columns, a prunable query spent 254–351 ms
+  in this fetch with 481 sealed entries, and 9–13 ms with 540 once it read at
+  the snapshot.
 - **The preview reads the newest entries by page.** An unordered `LIMIT n`
   is answered by the newest micro-segments holding n rows, and the planner
   used to fetch the whole manifest to find them — 285,000 entries per buffer

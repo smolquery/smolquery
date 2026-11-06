@@ -258,6 +258,16 @@ defmodule Smolquery.BufferService.HotManifest do
   @type claim :: %{ids: [String.t()], keys: [String.t()]}
 
   @typedoc """
+  What a plan pinned at or after an entry's seal needs of it (`entries_at/4`):
+  who it is, and the claim keys the membership rule rejects it by.
+  """
+  @type settled :: %{
+          id: String.t(),
+          sealed_at: non_neg_integer(),
+          claim_keys: [String.t(), ...]
+        }
+
+  @typedoc """
   A released claim's output key(s) and the ids it covered, held until the
   release is reconciled against the catalog (T-386).
   """
@@ -490,6 +500,31 @@ defmodule Smolquery.BufferService.HotManifest do
     |> Enum.uniq()
     |> Enum.flat_map(&lookup(manifest, table_ref, &1))
     |> Enum.sort_by(& &1.id)
+  end
+
+  @doc """
+  Every entry of the table, as a plan pinned at catalog version `snapshot`
+  needs it (T-328).
+
+  An entry with a claim and a `sealed_at` at or before `snapshot` comes back
+  as `t:settled/0`: only what the planner needs to know it holds no rows
+  there. Every other entry comes back as `entries/4` answers it, by the same
+  `:stats` option. Both are built by the match spec, so a settled entry's
+  stats and field ids are never copied out of ETS.
+
+  A settled entry is reduced, not left out. A replica can lag its owner by one
+  step of the seal handoff, and the planner picks the copy furthest along: with
+  the owner's copy gone, a laggard's unclaimed copy would win and its rows would
+  count twice. An entry with a `sealed_at` and no claim is never settled, since
+  the membership rule has no keys to reject it by.
+  """
+  @spec entries_at(t(), Store.table_ref(), non_neg_integer(), stats: boolean()) ::
+          [Entry.t() | settled()]
+  def entries_at(%__MODULE__{table: table}, table_ref, snapshot, opts \\ []) do
+    spec =
+      settled_spec(table_ref, snapshot) ++ entry_spec(table_ref, Keyword.get(opts, :stats, true))
+
+    measured(:entries, table, fn -> :ets.select(table, spec) end)
   end
 
   @doc """
@@ -1381,6 +1416,17 @@ defmodule Smolquery.BufferService.HotManifest do
 
   defp newest_spec(table_ref, before, stats),
     do: [{{{table_ref, :"$2"}, :"$1"}, [{:<, :"$2", before}], [entry_body(stats)]}]
+
+  defp settled_spec(table_ref, snapshot) do
+    sealed_at = {:map_get, :sealed_at, :"$1"}
+    claim_keys = {:map_get, :claim_keys, :"$1"}
+
+    [
+      {{{table_ref, :_}, :"$1"},
+       [{:is_integer, sealed_at}, {:"=<", sealed_at, snapshot}, {:"=/=", claim_keys, []}],
+       [%{id: {:map_get, :id, :"$1"}, sealed_at: sealed_at, claim_keys: claim_keys}]}
+    ]
+  end
 
   defp entry_body(true), do: :"$1"
 

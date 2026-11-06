@@ -99,10 +99,12 @@ defmodule Smolquery.StorageService.Handoff.Seal do
 
   Retirement records the snapshot the commit reported. For a reconciling attempt
   that is the catalog's *current* snapshot rather than the one the original commit
-  produced, which is a snapshot at or after it — harmless, because the stamp is
-  bookkeeping for the grace-period reaper and no longer what a query dedups on.
-  Reading each file's true begin-snapshot out of DuckLake's metadata would be
-  precision nothing consumes.
+  produced, which is a snapshot at or after it — harmless, because no query dedups
+  on the stamp. The grace-period reaper reads it, and so does the hot manifest read
+  (T-328), which shrinks an entry stamped at or before a plan's snapshot. Both are
+  right so long as the stamp is never earlier than the commit, and a plan that sees
+  otherwise fails rather than miscounts. Reading each file's true begin-snapshot out
+  of DuckLake's metadata would be precision nothing consumes.
 
   ## A table the catalog does not know is an error, not something to create
 
