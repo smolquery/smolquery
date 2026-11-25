@@ -195,7 +195,7 @@ queries → QueryService ──────────────────�
 
 ## Running locally
 
-Requires OTP 29.0.2 / Elixir 1.20.2 (pinned in `.tool-versions`, matching CI).
+Requires OTP 29.1.3 / Elixir 1.20.5 (pinned in `.tool-versions`, matching CI).
 
 ```sh
 mise install      # or asdf install

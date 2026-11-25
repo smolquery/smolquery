@@ -1,4 +1,4 @@
-FROM elixir:1.20-slim@sha256:e500da1777164f9be05f7ffc0fe06cdb692f453bf7d651755e72310ec8a92eed AS build
+FROM elixir:1.20-slim@sha256:85b39770dd49e943ce86f2a8dcf7fc64c909c8df902d7dc8e69f405ecaab3769 AS build
 
 ENV MIX_ENV=prod
 WORKDIR /app
@@ -27,7 +27,7 @@ RUN mix assets.deploy
 COPY rel rel
 RUN mix release
 
-FROM elixir:1.20-slim@sha256:e500da1777164f9be05f7ffc0fe06cdb692f453bf7d651755e72310ec8a92eed
+FROM elixir:1.20-slim@sha256:85b39770dd49e943ce86f2a8dcf7fc64c909c8df902d7dc8e69f405ecaab3769
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
