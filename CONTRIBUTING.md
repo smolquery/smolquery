@@ -7,8 +7,8 @@ Thanks for your interest. This is an early, opinionated project; see
 ## Dev setup
 
 Toolchain versions are pinned in [`.tool-versions`](.tool-versions) and match
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) — **OTP 29.0.2 / Elixir
-1.20.2**. With [mise](https://mise.jdx.dev) (or asdf) installed:
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) — **OTP 29.1.3 / Elixir
+1.20.5**. With [mise](https://mise.jdx.dev) (or asdf) installed:
 
 ```sh
 mise install    # installs the pinned Erlang and Elixir
