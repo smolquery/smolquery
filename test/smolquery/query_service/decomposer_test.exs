@@ -195,6 +195,60 @@ defmodule Smolquery.QueryService.DecomposerTest do
       )
     end
 
+    test "ORDER BY a position orders by the column at that position", %{tmp_dir: tmp_dir} do
+      by_aggregate =
+        round_trip(
+          "SELECT name, count(*), avg(value) FROM analytics.events " <>
+            "GROUP BY name ORDER BY 2 DESC, 1 LIMIT 3",
+          tmp_dir
+        )
+
+      assert by_aggregate.final_tail =~ ~s|ORDER BY "count_star()" DESC, "name" LIMIT 3|
+
+      by_key =
+        round_trip(
+          "SELECT name, sum(value) AS s FROM analytics.events GROUP BY name ORDER BY 1 DESC",
+          tmp_dir
+        )
+
+      assert by_key.final_tail =~ ~s|ORDER BY "name" DESC|
+    end
+
+    test "ORDER BY keeps an explicit null order", %{tmp_dir: tmp_dir} do
+      decomposition =
+        round_trip(
+          "SELECT tag, count(*) AS n FROM analytics.events " <>
+            "GROUP BY tag ORDER BY tag DESC NULLS FIRST, n ASC NULLS LAST",
+          tmp_dir
+        )
+
+      assert decomposition.final_tail =~ ~s|ORDER BY "tag" DESC NULLS FIRST, "n" ASC NULLS LAST|
+    end
+
+    test "ORDER BY a position keeps its null order", %{tmp_dir: tmp_dir} do
+      decomposition =
+        round_trip(
+          "SELECT tag, count(*) AS n FROM analytics.events " <>
+            "GROUP BY tag ORDER BY 1 DESC NULLS FIRST, 2 NULLS LAST",
+          tmp_dir
+        )
+
+      assert decomposition.final_tail =~ ~s|ORDER BY "tag" DESC NULLS FIRST, "n"|
+    end
+
+    test "ORDER BY a position is not the select item that is the same literal", %{
+      tmp_dir: tmp_dir
+    } do
+      decomposition =
+        round_trip(
+          "SELECT 2 AS two, name, count(*) AS n FROM analytics.events " <>
+            "GROUP BY 2, name ORDER BY 2 LIMIT 3",
+          tmp_dir
+        )
+
+      assert decomposition.final_tail =~ ~s|ORDER BY "name" LIMIT 3|
+    end
+
     test "top-k orders and limits only at the final step", %{tmp_dir: tmp_dir} do
       decomposition =
         round_trip(
@@ -848,9 +902,23 @@ defmodule Smolquery.QueryService.DecomposerTest do
       assert :order_by_expression = refused(twice, describe(twice))
     end
 
-    test "ORDER BY a constant is a position, not the select item that is the same literal" do
+    test "ORDER BY a position out of range, a decimal or a string constant" do
+      outputs =
+        describe("SELECT name, count(*), sum(value) FROM analytics.events GROUP BY name")
+
+      for position <- ["0", "4", "-1", "2.5", "'2'"] do
+        sql =
+          "SELECT name, count(*), sum(value) FROM analytics.events GROUP BY name " <>
+            "ORDER BY #{position} LIMIT 3"
+
+        assert :order_by_position = refused(sql, outputs)
+      end
+    end
+
+    test "ORDER BY a position whose column name is another's too" do
       sql =
-        "SELECT 2 AS two, name, count(*) FROM analytics.events GROUP BY 2, name ORDER BY 2 LIMIT 3"
+        "SELECT count(*) AS n, sum(value) AS n FROM analytics.events GROUP BY name " <>
+          "ORDER BY 2"
 
       assert :order_by_position = refused(sql, describe(sql))
     end
