@@ -271,6 +271,14 @@ answers nothing at the TCP level.
 
 One note per release, newest first.
 
+### 0.29.4: OTP 29.1.3 and dependency advisories (T-770)
+
+**TL;DR.** smolquery now runs on OTP 29.1.3 and Elixir 1.20.5, with db_connection, Phoenix, Plug and Phoenix LiveView on their fixed releases. These fix advisories published 2026-11-17 to 2026-11-24. Nothing to change on upgrade.
+
+- **What reaches us on every node.** Crafted terms that overrun the heap or exhaust the stack in `binary_to_term` and abort the VM (CVE-2026-116293, CVE-2026-120961, CVE-2026-117642); gen_rpc decodes terms from its peers. TLS client session-ticket poisoning and SNI resumption crossing (CVE-2026-94200, CVE-2026-105236), on our connections to S3 and the catalog. An AArch64 JIT bug (CVE-2026-115747) on the arm64 images.
+- **What reaches `:web` nodes.** A LiveView join without `"url"` skips the `live_session` `on_mount` hooks (CVE-2026-126334), and `SmolqueryWeb.Auth` guards the LiveView socket with one of those hooks. A client-selected V1 serializer crashes socket broadcast dispatch (CVE-2026-129344). Multipart framing was not charged to the `:length` limit (CVE-2026-120287); the UI endpoint parses multipart, the API does not.
+- **What does not reach us.** db_connection's forged-stream code execution (CVE-2026-133555) needs attacker-built structs in the process. We use no Phoenix Presence, `httpc`, ESI, SNMP or xmerl.
+
 ### Unreleased: one query node never scatters (T-769)
 
 **TL;DR.** A node that is the only query node now answers on one engine, instead of splitting a query into 4 local workers. Most queries get faster, and `SMOLQUERY_DISTRIBUTED_LOCAL_WORKERS` is gone.
